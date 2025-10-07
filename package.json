@@ -1,0 +1,56 @@
+{
+  "name": "capacitor-3rddigital-appupdate",
+  "version": "1.0.0",
+  "description": "Auto OTA update handler for Capacitor + React apps",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "clean": "rm -rf dist",
+    "prepublishOnly": "npm run clean && npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/latest3rddigital/capacitor-3rddigital-appupdate.git"
+  },
+  "keywords": [
+    "capacitor",
+    "react",
+    "ota",
+    "update",
+    "hot-reload"
+  ],
+  "author": "Sagar Bhavsar",
+  "license": "MIT",
+  "type": "module",
+  "bugs": {
+    "url": "https://github.com/latest3rddigital/capacitor-3rddigital-appupdate/issues"
+  },
+  "homepage": "https://github.com/latest3rddigital/capacitor-3rddigital-appupdate#readme",
+  "dependencies": {
+    "@capacitor/core": "^7.4.3",
+    "@capacitor/device": "^7.0.2",
+    "@capgo/capacitor-updater": "^7.18.2",
+    "@inquirer/prompts": "^7.8.6",
+    "antd": "^5.27.4",
+    "axios": "^1.12.2",
+    "form-data": "^4.0.4"
+  },
+  "peerDependencies": {
+    "react": "^18 || ^19",
+    "react-dom": "^18 || ^19"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.1",
+    "typescript": "^5.9.3"
+  },
+  "bin": {
+    "appupdate": "./scripts/bundle.cjs"
+  },
+  "files": [
+    "dist",
+    "src"
+  ]
+}
