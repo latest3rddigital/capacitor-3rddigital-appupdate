@@ -21,10 +21,11 @@ This package has peer dependencies that also need to be installed:
 npm install @capacitor/core @capacitor/device @capgo/capacitor-updater
 ```
 
-Run pod install for iOS:
+After installation, build your app and sync Capacitor:
 
 ```sh
-cd ios && pod install
+npm run build
+npx cap sync
 ```
 
 ## 📦 Usage in Your App
@@ -39,7 +40,7 @@ const App = () => {
   const { isUpdateModalVisible, updateInfo, handleUpdate, setUpdateModalVisible } = useCapacitorUpdater({
     iosPackage: "com.example.ios",
     androidPackage: "com.example.android",
-    key: "example-key",
+    apiKey: "example-key",
   });
 
   return (
