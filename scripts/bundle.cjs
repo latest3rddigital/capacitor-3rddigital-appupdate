@@ -1,17 +1,17 @@
 #!/usr/bin/env node
-const { execSync } = require('child_process');
-const path = require('path');
-const fs = require('fs');
-const axios = require('axios');
-const FormData = require('form-data');
-const { input, select, confirm } = require('@inquirer/prompts');
+const { execSync } = require("child_process");
+const path = require("path");
+const fs = require("fs");
+const axios = require("axios");
+const FormData = require("form-data");
+const { input, select, confirm } = require("@inquirer/prompts");
 
-const API_BASE_URL = 'https://dev.3rddigital.com/appupdate-api/api/';
+const API_BASE_URL = "https://dev.3rddigital.com/appupdate-api/api/";
 
 function run(command) {
   try {
     console.log(`\n➡️ Running: ${command}\n`);
-    execSync(command, { stdio: 'inherit' });
+    execSync(command, { stdio: "inherit" });
   } catch (err) {
     console.error(`❌ Command failed: ${command}`);
     console.error(err.message);
@@ -29,26 +29,31 @@ async function uploadBundle({ filePath, platform, config }) {
 
   const fileStream = fs.createReadStream(filePath);
   const form = new FormData();
-  form.append('bundle', fileStream);
-  form.append('projectId', config.PROJECT_ID);
-  form.append('environment', config.ENVIRONMENT);
-  form.append('platform', platform);
-  form.append('version', config.VERSION);
-  form.append('buildNumber', String(config.BUILD_NUMBER));
-  form.append('forceUpdate', String(config.FORCE_UPDATE));
+  form.append("bundle", fileStream);
+  form.append("projectId", config.PROJECT_ID);
+  form.append("environment", config.ENVIRONMENT);
+  form.append("platform", platform);
+  form.append("version", config.VERSION);
+  form.append("forceUpdate", String(config.FORCE_UPDATE));
 
   try {
     const res = await axios.post(`${API_BASE_URL}/bundles`, form, {
-      headers: { ...form.getHeaders(), Authorization: `Bearer ${config.API_TOKEN}` },
+      headers: {
+        ...form.getHeaders(),
+        Authorization: `Bearer ${config.API_TOKEN}`,
+      },
     });
-    console.log(`✅ ${platform} bundle uploaded! Response:`, JSON.stringify(res.data, null, 2));
+    console.log(
+      `✅ ${platform} bundle uploaded! Response:`,
+      JSON.stringify(res.data, null, 2)
+    );
   } catch (err) {
     console.error(`❌ ${platform} bundle upload failed!`);
     if (err.response) {
-      console.error('Status:', err.response.status);
-      console.error('Data:', err.response.data);
+      console.error("Status:", err.response.status);
+      console.error("Data:", err.response.data);
     } else {
-      console.error('Message:', err.message);
+      console.error("Message:", err.message);
     }
     process.exit(1);
   }
@@ -59,19 +64,19 @@ async function getCommonConfig() {
 
   const API_TOKEN = await input({
     message: `Enter API Token:`,
-    validate: (val) => (val.trim() ? true : 'API Token required'),
+    validate: (val) => (val.trim() ? true : "API Token required"),
   });
 
   const PROJECT_ID = await input({
     message: `Enter Project ID:`,
-    validate: (val) => (val.trim() ? true : 'Project ID required'),
+    validate: (val) => (val.trim() ? true : "Project ID required"),
   });
 
   const ENVIRONMENT = await select({
     message: `Select Environment:`,
     choices: [
-      { name: 'development', value: 'development' },
-      { name: 'production', value: 'production' },
+      { name: "development", value: "development" },
+      { name: "production", value: "production" },
     ],
   });
 
@@ -83,42 +88,40 @@ async function getPlatformConfig(platform) {
 
   const VERSION = await input({
     message: `(${platform}) Enter App Version (e.g. 1.0.0):`,
-    validate: (val) => (val.trim() ? true : 'Version required'),
+    validate: (val) => (val.trim() ? true : "Version required"),
   });
 
-  const BUILD_NUMBER = await input({
-    message: `(${platform}) Enter Build Number:`,
-    validate: (val) => (!isNaN(val) && val.trim() !== '' ? true : 'Must be a number'),
+  const FORCE_UPDATE = await confirm({
+    message: `(${platform}) Force Update?`,
+    default: false,
   });
 
-  const FORCE_UPDATE = await confirm({ message: `(${platform}) Force Update?`, default: false });
-
-  return { VERSION, BUILD_NUMBER, FORCE_UPDATE };
+  return { VERSION, FORCE_UPDATE };
 }
 
 function getAppId() {
-  const configPath = path.join(process.cwd(), 'capacitor.config.ts');
+  const configPath = path.join(process.cwd(), "capacitor.config.ts");
   if (!fs.existsSync(configPath)) {
-    console.error('❌ capacitor.config.ts not found!');
+    console.error("❌ capacitor.config.ts not found!");
     process.exit(1);
   }
-  const content = fs.readFileSync(configPath, 'utf-8');
+  const content = fs.readFileSync(configPath, "utf-8");
   const match = content.match(/appId:\s*['"`](.*?)['"`]/);
   if (!match) {
-    console.error('❌ Could not extract appId from capacitor.config.ts');
+    console.error("❌ Could not extract appId from capacitor.config.ts");
     process.exit(1);
   }
   return match[1];
 }
 
 function getAppVersion() {
-  const pkgPath = path.join(process.cwd(), 'package.json');
+  const pkgPath = path.join(process.cwd(), "package.json");
   if (!fs.existsSync(pkgPath)) {
-    console.error('❌ package.json not found!');
+    console.error("❌ package.json not found!");
     process.exit(1);
   }
-  const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
-  return pkg.version || '0.0.0';
+  const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+  return pkg.version || "0.0.0";
 }
 
 function getLatestCapgoZip() {
@@ -127,25 +130,29 @@ function getLatestCapgoZip() {
   const expectedPrefix = `${appId}_${version}`;
 
   const files = fs.readdirSync(process.cwd());
-  const zipFiles = files.filter((f) => f.endsWith('.zip') && f.startsWith(expectedPrefix));
+  const zipFiles = files.filter(
+    (f) => f.endsWith(".zip") && f.startsWith(expectedPrefix)
+  );
 
   if (!zipFiles.length) {
     console.error(`❌ No Capgo bundle zip found matching: ${expectedPrefix}`);
     process.exit(1);
   }
 
-  zipFiles.sort((a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime());
+  zipFiles.sort(
+    (a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime()
+  );
   return path.join(process.cwd(), zipFiles[0]);
 }
 
 function buildBundle() {
-  console.log('📦 Building web app and Capgo bundle...');
+  console.log("📦 Building web app and Capgo bundle...");
 
   // Build web app once
-  run('npm run build');
+  run("npm run build");
 
   // Create Capgo zip
-  run('npx @capgo/cli@latest bundle zip');
+  run("npx @capgo/cli@latest bundle zip");
 
   // Detect generated zip
   const outputPath = getLatestCapgoZip();
@@ -157,7 +164,7 @@ function buildBundle() {
   try {
     const platformArg = process.argv[2];
     if (!platformArg) {
-      console.error('❌ Please specify a platform: android | ios | all');
+      console.error("❌ Please specify a platform: android | ios | all");
       process.exit(1);
     }
 
@@ -168,20 +175,28 @@ function buildBundle() {
     const bundleFile = buildBundle();
 
     // Android upload
-    if (platformArg === 'android' || platformArg === 'all') {
-      const androidConfig = await getPlatformConfig('android');
-      await uploadBundle({ filePath: bundleFile, platform: 'android', config: { ...commonConfig, ...androidConfig } });
+    if (platformArg === "android" || platformArg === "all") {
+      const androidConfig = await getPlatformConfig("android");
+      await uploadBundle({
+        filePath: bundleFile,
+        platform: "android",
+        config: { ...commonConfig, ...androidConfig },
+      });
     }
 
     // iOS upload
-    if (platformArg === 'ios' || platformArg === 'all') {
-      const iosConfig = await getPlatformConfig('ios');
-      await uploadBundle({ filePath: bundleFile, platform: 'ios', config: { ...commonConfig, ...iosConfig } });
+    if (platformArg === "ios" || platformArg === "all") {
+      const iosConfig = await getPlatformConfig("ios");
+      await uploadBundle({
+        filePath: bundleFile,
+        platform: "ios",
+        config: { ...commonConfig, ...iosConfig },
+      });
     }
 
-    console.log('\n🎉 All tasks completed successfully!');
+    console.log("\n🎉 All tasks completed successfully!");
   } catch (err) {
-    console.error('❌ Fatal error:', err.message);
+    console.error("❌ Fatal error:", err.message);
     process.exit(1);
   }
 })();

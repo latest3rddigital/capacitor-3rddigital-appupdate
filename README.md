@@ -113,7 +113,6 @@ You will be prompted for:
 - Project ID
 - Environment (development / production)
 - Version
-- Build Number
 - Force Update (true/false)
 
 What it does
