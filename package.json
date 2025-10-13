@@ -1,6 +1,6 @@
 {
   "name": "capacitor-3rddigital-appupdate",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Auto OTA update handler for Capacitor + React apps",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -29,6 +29,7 @@
   },
   "homepage": "https://github.com/latest3rddigital/capacitor-3rddigital-appupdate#readme",
   "dependencies": {
+    "@capacitor/app": "^7.1.0",
     "@capacitor/core": "^7.4.3",
     "@capacitor/device": "^7.0.2",
     "@capgo/capacitor-updater": "^7.18.2",

@@ -1,3 +1,4 @@
+import { App } from "@capacitor/app";
 import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { Device } from "@capacitor/device";
 import { CapacitorUpdater } from "@capgo/capacitor-updater";
@@ -41,6 +42,7 @@ export function useCapacitorUpdater(options?: {
           url,
           forceUpdate = false,
           bundleId,
+          appVersion,
         } = platformData;
 
         const currentBundle = await CapacitorUpdater.current();
@@ -49,7 +51,13 @@ export function useCapacitorUpdater(options?: {
             ? 0
             : Number(currentBundle.bundle.version);
 
-        if (availableVersion > currentVersion) {
+        const currentAppVersion = (await App.getInfo()).version;
+        const currentBundleVersion = appVersion ?? currentAppVersion;
+
+        if (
+          availableVersion > currentVersion &&
+          currentAppVersion === currentBundleVersion
+        ) {
           const info: UpdateInfo = {
             availableVersion,
             url,

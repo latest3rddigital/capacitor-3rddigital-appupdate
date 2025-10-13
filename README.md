@@ -18,7 +18,7 @@ yarn add capacitor-3rddigital-appupdate
 This package has peer dependencies that also need to be installed:
 
 ```sh
-npm install @capacitor/core @capacitor/device @capgo/capacitor-updater
+npm install @capacitor/app @capacitor/core @capacitor/device @capgo/capacitor-updater
 ```
 
 After installation, build your app and sync Capacitor:

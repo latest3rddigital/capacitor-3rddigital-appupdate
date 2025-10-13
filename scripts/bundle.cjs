@@ -83,20 +83,96 @@ async function getCommonConfig() {
   return { API_TOKEN, PROJECT_ID, ENVIRONMENT };
 }
 
+function getPlatformAppVersion(platform) {
+  try {
+    let projectRoot = path.resolve(__dirname);
+    while (
+      projectRoot.includes("node_modules") &&
+      !fs.existsSync(path.join(projectRoot, "package.json"))
+    ) {
+      projectRoot = path.resolve(projectRoot, "..");
+    }
+
+    if (projectRoot.includes("node_modules")) {
+      projectRoot = path.resolve(projectRoot, "../../");
+    }
+
+    if (platform === "android") {
+      const gradlePath = path.join(
+        projectRoot,
+        "android",
+        "app",
+        "build.gradle"
+      );
+      if (!fs.existsSync(gradlePath)) {
+        console.warn(`⚠️ Android build.gradle not found at ${gradlePath}`);
+        return null;
+      }
+      const gradleContent = fs.readFileSync(gradlePath, "utf8");
+      const match = gradleContent.match(/versionName\s+"([\d.]+)"/);
+      if (match && match[1]) {
+        return match[1];
+      } else {
+        console.warn("⚠️ Could not find versionName in build.gradle.");
+      }
+    } else if (platform === "ios") {
+      const iosDir = path.join(projectRoot, "ios");
+      if (!fs.existsSync(iosDir)) {
+        console.warn(`⚠️ iOS folder not found at ${iosDir}`);
+        return null;
+      }
+
+      const projectDir = fs
+        .readdirSync(iosDir)
+        .find((d) => d.endsWith(".xcodeproj"));
+
+      if (!projectDir) {
+        console.warn("⚠️ .xcodeproj not found inside ios directory.");
+        return null;
+      }
+
+      const pbxprojPath = path.join(iosDir, projectDir, "project.pbxproj");
+      if (!fs.existsSync(pbxprojPath)) {
+        console.warn("⚠️ project.pbxproj not found.");
+        return null;
+      }
+
+      const pbxprojContent = fs.readFileSync(pbxprojPath, "utf8");
+      const match = pbxprojContent.match(/MARKETING_VERSION\s*=\s*([\d.]+);/);
+
+      if (match && match[1]) {
+        return match[1];
+      } else {
+        console.warn("⚠️ Could not find MARKETING_VERSION in project.pbxproj.");
+      }
+    }
+  } catch (err) {
+    console.warn(`⚠️ Failed to read ${platform} version:`, err.message);
+  }
+
+  return null;
+}
+
 async function getPlatformConfig(platform) {
   console.log(`\n⚙️  Enter configuration for ${platform.toUpperCase()}\n`);
 
-  const VERSION = await input({
-    message: `(${platform}) Enter App Version (e.g. 1.0.0):`,
-    validate: (val) => (val.trim() ? true : "Version required"),
-  });
+  let detectedVersion = getPlatformAppVersion(platform);
+  if (detectedVersion) {
+    console.log(`📱 Detected ${platform} version: ${detectedVersion}`);
+  } else {
+    console.warn(`⚠️ Could not detect ${platform} version automatically.`);
+    detectedVersion = await input({
+      message: `(${platform}) Enter App Version (e.g. 1.0.0):`,
+      validate: (val) => (val.trim() ? true : "Version required"),
+    });
+  }
 
   const FORCE_UPDATE = await confirm({
     message: `(${platform}) Force Update?`,
     default: false,
   });
 
-  return { VERSION, FORCE_UPDATE };
+  return { VERSION: detectedVersion, FORCE_UPDATE };
 }
 
 function getAppId() {
