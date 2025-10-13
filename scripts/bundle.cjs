@@ -110,11 +110,8 @@ function getPlatformAppVersion(platform) {
       }
       const gradleContent = fs.readFileSync(gradlePath, "utf8");
       const match = gradleContent.match(/versionName\s+"([\d.]+)"/);
-      if (match && match[1]) {
-        return match[1];
-      } else {
-        console.warn("⚠️ Could not find versionName in build.gradle.");
-      }
+      if (match && match[1]) return match[1];
+      console.warn("⚠️ Could not find versionName in build.gradle.");
     } else if (platform === "ios") {
       const iosDir = path.join(projectRoot, "ios");
       if (!fs.existsSync(iosDir)) {
@@ -122,16 +119,26 @@ function getPlatformAppVersion(platform) {
         return null;
       }
 
-      const projectDir = fs
-        .readdirSync(iosDir)
-        .find((d) => d.endsWith(".xcodeproj"));
+      function findXcodeProj(dir) {
+        const files = fs.readdirSync(dir);
+        for (const f of files) {
+          const fullPath = path.join(dir, f);
+          if (fs.statSync(fullPath).isDirectory()) {
+            if (f.endsWith(".xcodeproj")) return fullPath;
+            const nested = findXcodeProj(fullPath);
+            if (nested) return nested;
+          }
+        }
+        return null;
+      }
 
-      if (!projectDir) {
+      const xcodeProjPath = findXcodeProj(iosDir);
+      if (!xcodeProjPath) {
         console.warn("⚠️ .xcodeproj not found inside ios directory.");
         return null;
       }
 
-      const pbxprojPath = path.join(iosDir, projectDir, "project.pbxproj");
+      const pbxprojPath = path.join(xcodeProjPath, "project.pbxproj");
       if (!fs.existsSync(pbxprojPath)) {
         console.warn("⚠️ project.pbxproj not found.");
         return null;
@@ -139,12 +146,8 @@ function getPlatformAppVersion(platform) {
 
       const pbxprojContent = fs.readFileSync(pbxprojPath, "utf8");
       const match = pbxprojContent.match(/MARKETING_VERSION\s*=\s*([\d.]+);/);
-
-      if (match && match[1]) {
-        return match[1];
-      } else {
-        console.warn("⚠️ Could not find MARKETING_VERSION in project.pbxproj.");
-      }
+      if (match && match[1]) return match[1];
+      console.warn("⚠️ Could not find MARKETING_VERSION in project.pbxproj.");
     }
   } catch (err) {
     console.warn(`⚠️ Failed to read ${platform} version:`, err.message);
