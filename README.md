@@ -41,6 +41,8 @@ const App = () => {
     iosPackage: "com.example.ios",
     androidPackage: "com.example.android",
     apiKey: "example-key",
+    showProgress: true,
+    onProgress: (p) => console.log(`Progress: ${p}%`),
   });
 
   return (
@@ -63,7 +65,7 @@ export default App;
 
 ## ⚙️ API Reference
 
-🔹 useCapacitorUpdater(options?: { iosPackage?: string; androidPackage?: string })
+🔹 useCapacitorUpdater(options?: { iosPackage?: string; androidPackage?: string; apiKey: string; showProgress?: boolean; onProgress?: (percent: number) => void })
 
 - Checks the server for available updates and manages the modal prompt.
 
@@ -75,6 +77,7 @@ Returns:
 | `isUpdateModalVisible`  | `boolean`        | Whether the update modal is visible |
 | `setUpdateModalVisible` | `(bool) => void` | Show/hide modal manually            |
 | `handleUpdate`          | `() => void`     | Downloads and installs the update   |
+| `progress`              | `number`         | Download progress                   |
 
 🔹 UpdaterModal
 

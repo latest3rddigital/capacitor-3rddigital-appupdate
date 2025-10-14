@@ -12,14 +12,19 @@ export function useCapacitorUpdater(options?: {
   iosPackage?: string;
   androidPackage?: string;
   apiKey?: string;
+  showProgress?: boolean;
+  onProgress?: (percent: number) => void;
 }) {
   const [isUpdateModalVisible, setUpdateModalVisible] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
+  const [progress, setProgress] = useState<number>(0);
 
   useEffect(() => {
-    (async () => {
-      if (!Capacitor.isNativePlatform()) return;
+    if (!Capacitor.isNativePlatform()) return;
 
+    let downloadListener: any;
+
+    (async () => {
       try {
         await CapacitorUpdater.notifyAppReady();
 
@@ -74,13 +79,33 @@ export function useCapacitorUpdater(options?: {
         message.error("Failed to check for updates.");
       }
     })();
+
+    if (options?.showProgress) {
+      downloadListener = CapacitorUpdater.addListener("download", (event) => {
+        const percent = Math.min(100, Math.max(0, event.percent));
+        setProgress(percent);
+        if (options?.onProgress) options.onProgress(percent);
+        message.open({
+          key: "update-progress",
+          content: `Downloading update... ${percent.toFixed(0)}%`,
+          duration: 0,
+        });
+      });
+    }
+
+    return () => {
+      if (downloadListener) downloadListener.remove();
+      message.destroy("update-progress");
+    };
   }, [options?.apiKey, options?.iosPackage, options?.androidPackage]);
 
   const handleUpdate = async (info = updateInfo) => {
     if (!info) return;
     setUpdateModalVisible(false);
 
-    const hideLoader = message.loading("Downloading update...", 0);
+    const hideLoader = !options?.showProgress
+      ? message.loading("Downloading update...", 0)
+      : undefined;
 
     try {
       const data = await CapacitorUpdater.download({
@@ -96,7 +121,8 @@ export function useCapacitorUpdater(options?: {
         data: { status: "success" },
       });
 
-      hideLoader();
+      hideLoader?.();
+      message.destroy("update-progress");
       message.success("Update installed successfully!");
       console.log("[CapacitorUpdater] Update installed");
     } catch (err: any) {
@@ -116,7 +142,8 @@ export function useCapacitorUpdater(options?: {
         },
       });
 
-      hideLoader();
+      hideLoader?.();
+      message.destroy("update-progress");
       message.error("Failed to install update.");
       console.error("[CapacitorUpdater] Failed to install update:", err);
     }
@@ -127,5 +154,6 @@ export function useCapacitorUpdater(options?: {
     isUpdateModalVisible,
     setUpdateModalVisible,
     handleUpdate,
+    progress,
   };
 }
