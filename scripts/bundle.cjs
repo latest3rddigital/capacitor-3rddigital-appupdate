@@ -45,7 +45,7 @@ async function uploadBundle({ filePath, platform, config }) {
     });
     console.log(
       `✅ ${platform} bundle uploaded! Response:`,
-      JSON.stringify(res.data, null, 2)
+      JSON.stringify(res.data, null, 2),
     );
   } catch (err) {
     console.error(`❌ ${platform} bundle upload failed!`);
@@ -102,7 +102,7 @@ function getPlatformAppVersion(platform) {
         projectRoot,
         "android",
         "app",
-        "build.gradle"
+        "build.gradle",
       );
       if (!fs.existsSync(gradlePath)) {
         console.warn(`⚠️ Android build.gradle not found at ${gradlePath}`);
@@ -210,7 +210,7 @@ function getLatestCapgoZip() {
 
   const files = fs.readdirSync(process.cwd());
   const zipFiles = files.filter(
-    (f) => f.endsWith(".zip") && f.startsWith(expectedPrefix)
+    (f) => f.endsWith(".zip") && f.startsWith(expectedPrefix),
   );
 
   if (!zipFiles.length) {
@@ -219,16 +219,16 @@ function getLatestCapgoZip() {
   }
 
   zipFiles.sort(
-    (a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime()
+    (a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime(),
   );
   return path.join(process.cwd(), zipFiles[0]);
 }
 
-function buildBundle() {
+function buildBundle(buildCommand) {
   console.log("📦 Building web app and Capgo bundle...");
 
   // Build web app once
-  run("npm run build");
+  run(buildCommand);
 
   // Create Capgo zip
   run("npx @capgo/cli@latest bundle zip");
@@ -241,17 +241,24 @@ function buildBundle() {
 
 (async () => {
   try {
-    const platformArg = process.argv[2];
-    if (!platformArg) {
-      console.error("❌ Please specify a platform: android | ios | all");
+    const rawArg = process.argv[2];
+    if (!rawArg) {
+      console.error(
+        "❌ Please specify a platform: android | ios | all (e.g., all:dev)",
+      );
       process.exit(1);
     }
+
+    const [platformArg, envSuffix] = rawArg.split(":");
 
     // Get common config once
     const commonConfig = await getCommonConfig();
 
+    const buildCommand = envSuffix
+      ? `npm run build:${envSuffix}`
+      : "npm run build";
     // Build bundle once
-    const bundleFile = buildBundle();
+    const bundleFile = buildBundle(buildCommand);
 
     // Android upload
     if (platformArg === "android" || platformArg === "all") {
