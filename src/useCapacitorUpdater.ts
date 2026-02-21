@@ -5,7 +5,7 @@ import { CapacitorUpdater } from "@capgo/capacitor-updater";
 import { useEffect, useState } from "react";
 import type { UpdateInfo } from "./types.js";
 
-const API_BASE_URL = "https://dev.3rddigital.com/appupdate-api/api";
+const APPUPDATE_BASE_URL = process.env.APPUPDATE_BASE_URL;
 
 export function useCapacitorUpdater(options?: {
   iosPackage?: string;
@@ -28,7 +28,7 @@ export function useCapacitorUpdater(options?: {
         await CapacitorUpdater.notifyAppReady();
 
         const response = await CapacitorHttp.get({
-          url: `${API_BASE_URL}/projects/get-bundle`,
+          url: `${APPUPDATE_BASE_URL}/projects/get-bundle`,
           params: {
             key: options?.apiKey ?? "",
             iosPackage: options?.iosPackage ?? "",
@@ -104,7 +104,7 @@ export function useCapacitorUpdater(options?: {
       await CapacitorUpdater.set(data);
 
       await CapacitorHttp.post({
-        url: `${API_BASE_URL}/bundles/${info.bundleId}/count`,
+        url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
         headers: { "Content-Type": "application/json" },
         data: { status: "success" },
       });
@@ -113,7 +113,7 @@ export function useCapacitorUpdater(options?: {
     } catch (err: any) {
       const deviceinfo = await Device.getInfo();
       await CapacitorHttp.post({
-        url: `${API_BASE_URL}/bundles/${info.bundleId}/count`,
+        url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
         headers: { "Content-Type": "application/json" },
         data: {
           status: "failure",

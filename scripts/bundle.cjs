@@ -1,12 +1,75 @@
 #!/usr/bin/env node
+require("dotenv").config();
 const { execSync } = require("child_process");
 const path = require("path");
 const fs = require("fs");
 const axios = require("axios");
-const FormData = require("form-data");
 const { input, select, confirm } = require("@inquirer/prompts");
+const { PutObjectCommand, S3Client } = require("@aws-sdk/client-s3");
+const { v4: uuidv4 } = require("uuid");
 
-const API_BASE_URL = "https://dev.3rddigital.com/appupdate-api/api/";
+const APPUPDATE_BASE_URL = process.env.APPUPDATE_BASE_URL;
+const APPUPDATE_AWS_REGION = process.env.APPUPDATE_AWS_REGION;
+const APPUPDATE_AWS_ACCESS_KEY_ID = process.env.APPUPDATE_AWS_ACCESS_KEY_ID;
+const APPUPDATE_AWS_SECRET_ACCESS_KEY =
+  process.env.APPUPDATE_AWS_SECRET_ACCESS_KEY;
+const APPUPDATE_AWS_BUCKET_NAME = process.env.APPUPDATE_AWS_BUCKET_NAME;
+
+function DecriptEnv(wrappedKey) {
+  if (!wrappedKey) {
+    return "";
+  }
+
+  if (typeof wrappedKey !== "string")
+    throw new TypeError("wrappedKey must be a string");
+
+  if (wrappedKey.length <= 8) throw new Error("wrappedKey too short to unwrap");
+  const trimmed = wrappedKey.slice(4, -2);
+  const result = trimmed.slice(0, 2) + trimmed.slice(4);
+  return result;
+}
+
+const s3Client = new S3Client({
+  region: DecriptEnv(APPUPDATE_AWS_REGION),
+  credentials: {
+    accessKeyId: DecriptEnv(APPUPDATE_AWS_ACCESS_KEY_ID),
+    secretAccessKey: DecriptEnv(APPUPDATE_AWS_SECRET_ACCESS_KEY),
+  },
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
+});
+
+async function uploadFileToS3(filePath, bucketName, folder) {
+  const fileName = path.basename(filePath);
+  const cleanFileName = fileName.replace(/\s+/g, "_");
+  const uniqueId = uuidv4();
+  const fileKey = `${folder}/${uniqueId}/${cleanFileName}`;
+  const fileBuffer = fs.readFileSync(filePath);
+
+  try {
+    const command = new PutObjectCommand({
+      Bucket: bucketName,
+      Key: fileKey,
+      Body: fileBuffer,
+      ContentType: "application/zip",
+      ACL: "public-read",
+    });
+
+    await s3Client.send(command);
+
+    const region = DecriptEnv(APPUPDATE_AWS_REGION);
+    const location = `https://${bucketName}.s3.${region}.amazonaws.com/${fileKey}`;
+
+    return {
+      Location: location,
+      Key: fileKey,
+      Bucket: bucketName,
+    };
+  } catch (error) {
+    console.error("❌ S3 Upload Error:", error);
+    throw error;
+  }
+}
 
 function run(command) {
   try {
@@ -27,22 +90,39 @@ async function uploadBundle({ filePath, platform, config }) {
     process.exit(1);
   }
 
-  const fileStream = fs.createReadStream(filePath);
-  const form = new FormData();
-  form.append("bundle", fileStream);
-  form.append("projectId", config.PROJECT_ID);
-  form.append("environment", config.ENVIRONMENT);
-  form.append("platform", platform);
-  form.append("version", config.VERSION);
-  form.append("forceUpdate", String(config.FORCE_UPDATE));
-
   try {
-    const res = await axios.post(`${API_BASE_URL}/bundles`, form, {
+    const s3Result = await uploadFileToS3(
+      filePath,
+      DecriptEnv(APPUPDATE_AWS_BUCKET_NAME),
+      config.ENVIRONMENT === "development"
+        ? "uploads/development"
+        : "uploads/production",
+    );
+
+    console.log(`✅ S3 Upload Complete: ${s3Result.Key}`);
+    console.log(`📝 Step 2: Registering with backend API...`);
+
+    const stats = fs.statSync(filePath);
+
+    const payload = {
+      projectId: config.PROJECT_ID,
+      environment: config.ENVIRONMENT,
+      platform: platform,
+      version: config.VERSION,
+      forceUpdate: config.FORCE_UPDATE,
+      s3Key: s3Result.Key,
+      s3Url: s3Result.Location,
+      fileName: path.basename(filePath),
+      fileSize: stats.size,
+    };
+
+    const res = await axios.post(`${APPUPDATE_BASE_URL}/bundles`, payload, {
       headers: {
-        ...form.getHeaders(),
+        "Content-Type": "application/json",
         Authorization: `Bearer ${config.API_TOKEN}`,
       },
     });
+
     console.log(
       `✅ ${platform} bundle uploaded! Response:`,
       JSON.stringify(res.data, null, 2),
