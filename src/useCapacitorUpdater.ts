@@ -5,15 +5,15 @@ import { CapacitorUpdater } from "@capgo/capacitor-updater";
 import { useEffect, useState } from "react";
 import type { UpdateInfo } from "./types.js";
 
-const APPUPDATE_BASE_URL = process.env.APPUPDATE_BASE_URL;
-
 export function useCapacitorUpdater(options?: {
+  baseUrl: string;
   iosPackage?: string;
   androidPackage?: string;
   apiKey?: string;
   showProgress?: boolean;
   onProgress?: (percent: number) => void;
 }) {
+  const APPUPDATE_BASE_URL = options?.baseUrl;
   const [isUpdateModalVisible, setUpdateModalVisible] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [progress, setProgress] = useState<number>(0);
