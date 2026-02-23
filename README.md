@@ -38,6 +38,7 @@ import { UpdaterModal, useCapacitorUpdater } from "capacitor-3rddigital-appupdat
 
 const App = () => {
   const { isUpdateModalVisible, updateInfo, handleUpdate, setUpdateModalVisible } = useCapacitorUpdater({
+    baseUrl: 'https://your-api-url.com',
     iosPackage: "com.example.ios",
     androidPackage: "com.example.android",
     apiKey: "example-key",
@@ -65,7 +66,7 @@ export default App;
 
 ## ⚙️ API Reference
 
-🔹 useCapacitorUpdater(options?: { iosPackage?: string; androidPackage?: string; apiKey: string; showProgress?: boolean; onProgress?: (percent: number) => void })
+🔹 useCapacitorUpdater(options?: { baseUrl: string; iosPackage?: string; androidPackage?: string; apiKey: string; showProgress?: boolean; onProgress?: (percent: number) => void })
 
 - Checks the server for available updates and manages the modal prompt.
 
@@ -122,4 +123,4 @@ What it does
 
 - Builds your React web app
 - Creates Capgo zip bundle
-- Uploads bundle + metadata to your update server (https://dev.3rddigital.com/appupdate-api/api/)
+- Uploads bundle + metadata to your update server
