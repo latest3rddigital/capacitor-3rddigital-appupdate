@@ -107,8 +107,6 @@ export function useCapacitorUpdater(options?: {
         url: info.url,
       });
 
-      await CapacitorUpdater.next(data);
-
       await CapacitorHttp.post({
         url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
         headers: { "Content-Type": "application/json" },
@@ -119,7 +117,7 @@ export function useCapacitorUpdater(options?: {
 
       setTimeout(async () => {
         console.log("[CapacitorUpdater] Update installed");
-        await CapacitorUpdater.reload();
+        await CapacitorUpdater.set(data);
       }, 2500);
     } catch (err: any) {
       const deviceinfo = await Device.getInfo();
