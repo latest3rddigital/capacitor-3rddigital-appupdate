@@ -107,11 +107,7 @@ export function useCapacitorUpdater(options?: {
         url: info.url,
       });
 
-      if (!data?.id) {
-        throw new Error("Bundle download failed or invalid ID");
-      }
-
-      await CapacitorUpdater.next({ id: data?.id });
+      await CapacitorUpdater.next(data);
 
       await CapacitorHttp.post({
         url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
@@ -120,8 +116,11 @@ export function useCapacitorUpdater(options?: {
       });
 
       localStorage.setItem("UPDATE_IN_PROGRESS", "true");
-      await CapacitorUpdater.reload();
-      console.log("[CapacitorUpdater] Update installed");
+
+      setTimeout(async () => {
+        console.log("[CapacitorUpdater] Update installed");
+        await CapacitorUpdater.reload();
+      }, 2500);
     } catch (err: any) {
       const deviceinfo = await Device.getInfo();
       await CapacitorHttp.post({
