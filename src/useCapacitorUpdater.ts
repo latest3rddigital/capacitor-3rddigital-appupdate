@@ -27,6 +27,12 @@ export function useCapacitorUpdater(options?: {
       try {
         await CapacitorUpdater.notifyAppReady();
 
+        const wasUpdating = localStorage.getItem("UPDATE_IN_PROGRESS");
+        if (wasUpdating === "true") {
+          console.log("[Updater] Skipping update check after reload");
+          return;
+        }
+
         const response = await CapacitorHttp.get({
           url: `${APPUPDATE_BASE_URL}/projects/get-bundle`,
           params: {
