@@ -120,11 +120,8 @@ export function useCapacitorUpdater(options?: {
       });
 
       localStorage.setItem("UPDATE_IN_PROGRESS", "true");
-
-      setTimeout(async () => {
-        console.log("[CapacitorUpdater] Update installed");
-        await CapacitorUpdater.reload();
-      }, 2500);
+      await CapacitorUpdater.reload();
+      console.log("[CapacitorUpdater] Update installed");
     } catch (err: any) {
       const deviceinfo = await Device.getInfo();
       await CapacitorHttp.post({
