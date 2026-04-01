@@ -152,13 +152,23 @@ async function getCommonConfig() {
     validate: (val) => (val.trim() ? true : "Project ID required"),
   });
 
-  const ENVIRONMENT = await select({
-    message: `Select Environment:`,
-    choices: [
-      { name: "development", value: "development" },
-      { name: "production", value: "production" },
-    ],
-  });
+  let ENVIRONMENT;
+  let isEnvironmentConfirmed = false;
+
+  while (!isEnvironmentConfirmed) {
+    ENVIRONMENT = await select({
+      message: `Select Environment:`,
+      choices: [
+        { name: "development", value: "development" },
+        { name: "production", value: "production" },
+      ],
+    });
+
+    isEnvironmentConfirmed = await confirm({
+      message: `Continue with ${ENVIRONMENT} environment?`,
+      default: true,
+    });
+  }
 
   return { API_TOKEN, PROJECT_ID, ENVIRONMENT };
 }
@@ -359,22 +369,32 @@ async function getAndroidFlavorSelection() {
     return metadata.defaultConfig;
   }
 
-  const selectedFlavor = await select({
-    message: "Select Android flavor:",
-    choices: [
-      {
-        name: `Default (${metadata.defaultConfig.appId} / ${metadata.defaultConfig.version})`,
-        value: metadata.defaultConfig,
-      },
-      ...metadata.flavors.map((flavor) => ({
-        name: `${flavor.name} (${flavor.appId} / ${flavor.version})`,
-        value: {
-          ...flavor,
-          label: flavor.name,
+  let selectedFlavor;
+  let isFlavorConfirmed = false;
+
+  while (!isFlavorConfirmed) {
+    selectedFlavor = await select({
+      message: "Select Android flavor:",
+      choices: [
+        {
+          name: `Default (${metadata.defaultConfig.appId} / ${metadata.defaultConfig.version})`,
+          value: metadata.defaultConfig,
         },
-      })),
-    ],
-  });
+        ...metadata.flavors.map((flavor) => ({
+          name: `${flavor.name} (${flavor.appId} / ${flavor.version})`,
+          value: {
+            ...flavor,
+            label: flavor.name,
+          },
+        })),
+      ],
+    });
+
+    isFlavorConfirmed = await confirm({
+      message: `Continue with Android flavor ${selectedFlavor.label ?? selectedFlavor.name}?`,
+      default: true,
+    });
+  }
 
   return selectedFlavor;
 }
@@ -568,13 +588,23 @@ async function getIosTargetSelection() {
     return metadata.defaultConfig;
   }
 
-  const selectedTarget = await select({
-    message: "Select iOS target:",
-    choices: metadata.targets.map((target) => ({
-      name: `${target.label} (${target.appId} / ${target.version ?? "unknown version"})`,
-      value: target,
-    })),
-  });
+  let selectedTarget;
+  let isTargetConfirmed = false;
+
+  while (!isTargetConfirmed) {
+    selectedTarget = await select({
+      message: "Select iOS target:",
+      choices: metadata.targets.map((target) => ({
+        name: `${target.label} (${target.appId} / ${target.version ?? "unknown version"})`,
+        value: target,
+      })),
+    });
+
+    isTargetConfirmed = await confirm({
+      message: `Continue with iOS target ${selectedTarget.label ?? selectedTarget.name}?`,
+      default: true,
+    });
+  }
 
   return selectedTarget;
 }
