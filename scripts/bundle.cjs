@@ -163,70 +163,431 @@ async function getCommonConfig() {
   return { API_TOKEN, PROJECT_ID, ENVIRONMENT };
 }
 
-function getPlatformAppVersion(platform) {
+function extractBracedBlock(content, startIndex) {
+  const openIndex = content.indexOf("{", startIndex);
+  if (openIndex === -1) return null;
+
+  let depth = 0;
+  let inSingleQuote = false;
+  let inDoubleQuote = false;
+  let inTemplate = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+
+  for (let index = openIndex; index < content.length; index += 1) {
+    const char = content[index];
+    const nextChar = content[index + 1];
+    const prevChar = content[index - 1];
+
+    if (inLineComment) {
+      if (char === "\n") inLineComment = false;
+      continue;
+    }
+
+    if (inBlockComment) {
+      if (prevChar === "*" && char === "/") inBlockComment = false;
+      continue;
+    }
+
+    if (!inSingleQuote && !inDoubleQuote && !inTemplate) {
+      if (char === "/" && nextChar === "/") {
+        inLineComment = true;
+        index += 1;
+        continue;
+      }
+
+      if (char === "/" && nextChar === "*") {
+        inBlockComment = true;
+        index += 1;
+        continue;
+      }
+    }
+
+    if (!inDoubleQuote && !inTemplate && char === "'" && prevChar !== "\\") {
+      inSingleQuote = !inSingleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && !inTemplate && char === '"' && prevChar !== "\\") {
+      inDoubleQuote = !inDoubleQuote;
+      continue;
+    }
+
+    if (!inSingleQuote && !inDoubleQuote && char === "`" && prevChar !== "\\") {
+      inTemplate = !inTemplate;
+      continue;
+    }
+
+    if (inSingleQuote || inDoubleQuote || inTemplate) continue;
+
+    if (char === "{") depth += 1;
+    if (char === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          content: content.slice(openIndex + 1, index),
+          start: openIndex,
+          end: index,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+function extractNamedBlock(content, blockName) {
+  const blockRegex = new RegExp(`\\b${blockName}\\b\\s*\\{`, "m");
+  const match = blockRegex.exec(content);
+  if (!match) return null;
+  return extractBracedBlock(content, match.index);
+}
+
+function parseTopLevelNamedBlocks(content) {
+  const blocks = [];
+  let cursor = 0;
+
+  while (cursor < content.length) {
+    const remainder = content.slice(cursor);
+    const nameMatch = /^\s*([A-Za-z_][A-Za-z0-9_]*)\s*\{/.exec(remainder);
+
+    if (!nameMatch) {
+      cursor += 1;
+      continue;
+    }
+
+    const nameIndex = cursor + nameMatch.index;
+    const name = nameMatch[1];
+    const block = extractBracedBlock(content, nameIndex);
+
+    if (!block) break;
+
+    blocks.push({ name, content: block.content });
+    cursor = block.end + 1;
+  }
+
+  return blocks;
+}
+
+function readQuotedGradleValue(blockContent, key) {
+  const match = blockContent.match(
+    new RegExp(`\\b${key}\\b\\s+["']([^"']+)["']`),
+  );
+  return match?.[1] ?? null;
+}
+
+function getProjectRoot() {
+  let projectRoot = path.resolve(__dirname);
+  while (
+    projectRoot.includes("node_modules") &&
+    !fs.existsSync(path.join(projectRoot, "package.json"))
+  ) {
+    projectRoot = path.resolve(projectRoot, "..");
+  }
+
+  if (projectRoot.includes("node_modules")) {
+    projectRoot = path.resolve(projectRoot, "../../");
+  }
+
+  return projectRoot;
+}
+
+function findFirstXcodeProj(dir) {
+  const files = fs.readdirSync(dir);
+  for (const file of files) {
+    const fullPath = path.join(dir, file);
+    if (fs.statSync(fullPath).isDirectory()) {
+      if (file.endsWith(".xcodeproj")) return fullPath;
+      const nested = findFirstXcodeProj(fullPath);
+      if (nested) return nested;
+    }
+  }
+  return null;
+}
+
+function getAndroidProjectMetadata() {
+  const projectRoot = getProjectRoot();
+  const gradlePath = path.join(projectRoot, "android", "app", "build.gradle");
+  if (!fs.existsSync(gradlePath)) {
+    console.warn(`⚠️ Android build.gradle not found at ${gradlePath}`);
+    return null;
+  }
+
+  const gradleContent = fs.readFileSync(gradlePath, "utf8");
+  const defaultConfigBlock = extractNamedBlock(gradleContent, "defaultConfig");
+  const productFlavorsBlock = extractNamedBlock(gradleContent, "productFlavors");
+
+  const defaultAppId =
+    readQuotedGradleValue(defaultConfigBlock?.content ?? "", "applicationId") ??
+    getAppId();
+  const defaultVersion =
+    readQuotedGradleValue(defaultConfigBlock?.content ?? "", "versionName") ??
+    getAppVersion();
+
+  const flavors = parseTopLevelNamedBlocks(productFlavorsBlock?.content ?? "").map(
+    ({ name, content }) => {
+      const flavorAppId = readQuotedGradleValue(content, "applicationId");
+      const flavorAppIdSuffix = readQuotedGradleValue(content, "applicationIdSuffix");
+      const flavorVersion = readQuotedGradleValue(content, "versionName");
+      const flavorVersionSuffix = readQuotedGradleValue(content, "versionNameSuffix");
+
+      return {
+        name,
+        appId: flavorAppId ?? `${defaultAppId}${flavorAppIdSuffix ?? ""}`,
+        version:
+          flavorVersion ?? `${defaultVersion}${flavorVersionSuffix ?? ""}`,
+      };
+    },
+  );
+
+  return {
+    defaultConfig: {
+      name: "default",
+      label: "Default",
+      appId: defaultAppId,
+      version: defaultVersion,
+    },
+    flavors,
+  };
+}
+
+async function getAndroidFlavorSelection() {
+  const metadata = getAndroidProjectMetadata();
+  if (!metadata) return null;
+
+  if (!metadata.flavors.length) {
+    return metadata.defaultConfig;
+  }
+
+  const selectedFlavor = await select({
+    message: "Select Android flavor:",
+    choices: [
+      {
+        name: `Default (${metadata.defaultConfig.appId} / ${metadata.defaultConfig.version})`,
+        value: metadata.defaultConfig,
+      },
+      ...metadata.flavors.map((flavor) => ({
+        name: `${flavor.name} (${flavor.appId} / ${flavor.version})`,
+        value: {
+          ...flavor,
+          label: flavor.name,
+        },
+      })),
+    ],
+  });
+
+  return selectedFlavor;
+}
+
+function parsePbxprojObjectsByIsa(pbxprojContent, isa) {
+  const objectRegex = new RegExp(
+    `([A-F0-9]{24}) /\\* ([^*]+) \\*/ = \\{[\\s\\S]*?isa = ${isa};([\\s\\S]*?)\\n\\s*\\};`,
+    "g",
+  );
+  const objects = [];
+  let match;
+
+  while ((match = objectRegex.exec(pbxprojContent)) !== null) {
+    objects.push({
+      id: match[1],
+      comment: match[2].trim(),
+      body: match[3],
+    });
+  }
+
+  return objects;
+}
+
+function readPbxValue(body, key) {
+  const match = body.match(new RegExp(`\\b${key}\\s*=\\s*([^;]+);`));
+  return match?.[1]?.trim() ?? null;
+}
+
+function cleanPbxString(value) {
+  if (!value) return null;
+  return value.replace(/^"(.*)"$/, "$1").trim();
+}
+
+function parsePbxArray(body, key) {
+  const match = body.match(new RegExp(`\\b${key}\\s*=\\s*\\(([\\s\\S]*?)\\);`));
+  if (!match) return [];
+
+  return match[1]
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => line.replace(/,$/, ""))
+    .map((line) => {
+      const idMatch = line.match(/^([A-F0-9]{24})/);
+      return idMatch?.[1] ?? null;
+    })
+    .filter(Boolean);
+}
+
+function isAppLikeTarget(targetName, productType) {
+  if (productType?.includes("application")) return true;
+
+  return ![
+    "Tests",
+    "UITests",
+    "UnitTests",
+    "NotificationService",
+    "Extension",
+    "Widget",
+  ].some((suffix) => targetName.endsWith(suffix));
+}
+
+function getIosProjectMetadata() {
+  const projectRoot = getProjectRoot();
+  const iosDir = path.join(projectRoot, "ios");
+  if (!fs.existsSync(iosDir)) {
+    console.warn(`⚠️ iOS folder not found at ${iosDir}`);
+    return null;
+  }
+
+  const xcodeProjPath = findFirstXcodeProj(iosDir);
+  if (!xcodeProjPath) {
+    console.warn("⚠️ .xcodeproj not found inside ios directory.");
+    return null;
+  }
+
+  const pbxprojPath = path.join(xcodeProjPath, "project.pbxproj");
+  if (!fs.existsSync(pbxprojPath)) {
+    console.warn("⚠️ project.pbxproj not found.");
+    return null;
+  }
+
+  const pbxprojContent = fs.readFileSync(pbxprojPath, "utf8");
+  const configObjects = parsePbxprojObjectsByIsa(
+    pbxprojContent,
+    "XCBuildConfiguration",
+  );
+  const configMap = new Map(
+    configObjects.map((config) => [
+      config.id,
+      {
+        name: cleanPbxString(readPbxValue(config.body, "name")),
+        version: cleanPbxString(readPbxValue(config.body, "MARKETING_VERSION")),
+        appId: cleanPbxString(
+          readPbxValue(config.body, "PRODUCT_BUNDLE_IDENTIFIER"),
+        ),
+        productName: cleanPbxString(readPbxValue(config.body, "PRODUCT_NAME")),
+      },
+    ]),
+  );
+
+  const configListObjects = parsePbxprojObjectsByIsa(
+    pbxprojContent,
+    "XCConfigurationList",
+  );
+  const configListMap = new Map(
+    configListObjects.map((configList) => [
+      configList.id,
+      {
+        defaultName: cleanPbxString(
+          readPbxValue(configList.body, "defaultConfigurationName"),
+        ),
+        buildConfigurations: parsePbxArray(configList.body, "buildConfigurations"),
+      },
+    ]),
+  );
+
+  const targetObjects = parsePbxprojObjectsByIsa(pbxprojContent, "PBXNativeTarget");
+  const targets = targetObjects
+    .map((target) => {
+      const targetName = cleanPbxString(readPbxValue(target.body, "name"));
+      const productType = cleanPbxString(readPbxValue(target.body, "productType"));
+      const configListId = cleanPbxString(
+        readPbxValue(target.body, "buildConfigurationList"),
+      )?.match(/^([A-F0-9]{24})/)?.[1];
+
+      if (!targetName || !configListId || !isAppLikeTarget(targetName, productType)) {
+        return null;
+      }
+
+      const configList = configListMap.get(configListId);
+      const buildConfigs =
+        configList?.buildConfigurations
+          .map((configId) => configMap.get(configId))
+          .filter(Boolean) ?? [];
+
+      const preferredConfig =
+        buildConfigs.find((config) => config.name === configList?.defaultName) ??
+        buildConfigs.find((config) => config.name === "Release") ??
+        buildConfigs[0];
+
+      if (!preferredConfig) return null;
+
+      return {
+        name: targetName,
+        label: `${targetName} [${preferredConfig.name ?? "Unknown"}]`,
+        appId: preferredConfig.appId ?? getAppId(),
+        version: preferredConfig.version ?? null,
+        productName: preferredConfig.productName ?? targetName,
+        buildConfiguration: preferredConfig.name ?? null,
+      };
+    })
+    .filter(Boolean);
+
+  if (!targets.length) {
+    const fallbackVersionMatch = pbxprojContent.match(
+      /MARKETING_VERSION\s*=\s*([^;]+);/,
+    );
+
+    return {
+      defaultConfig: {
+        name: "default",
+        label: "Default",
+        appId: getAppId(),
+        version: cleanPbxString(fallbackVersionMatch?.[1]) ?? null,
+      },
+      targets: [],
+    };
+  }
+
+  const uniqueTargets = targets.filter(
+    (target, index, allTargets) =>
+      allTargets.findIndex((candidate) => candidate.name === target.name) === index,
+  );
+
+  return {
+    defaultConfig: uniqueTargets[0],
+    targets: uniqueTargets,
+  };
+}
+
+async function getIosTargetSelection() {
+  const metadata = getIosProjectMetadata();
+  if (!metadata) return null;
+
+  if (metadata.targets.length <= 1) {
+    return metadata.defaultConfig;
+  }
+
+  const selectedTarget = await select({
+    message: "Select iOS target:",
+    choices: metadata.targets.map((target) => ({
+      name: `${target.label} (${target.appId} / ${target.version ?? "unknown version"})`,
+      value: target,
+    })),
+  });
+
+  return selectedTarget;
+}
+
+function getPlatformAppVersion(platform, selection) {
   try {
-    let projectRoot = path.resolve(__dirname);
-    while (
-      projectRoot.includes("node_modules") &&
-      !fs.existsSync(path.join(projectRoot, "package.json"))
-    ) {
-      projectRoot = path.resolve(projectRoot, "..");
-    }
-
-    if (projectRoot.includes("node_modules")) {
-      projectRoot = path.resolve(projectRoot, "../../");
-    }
-
     if (platform === "android") {
-      const gradlePath = path.join(
-        projectRoot,
-        "android",
-        "app",
-        "build.gradle",
-      );
-      if (!fs.existsSync(gradlePath)) {
-        console.warn(`⚠️ Android build.gradle not found at ${gradlePath}`);
-        return null;
-      }
-      const gradleContent = fs.readFileSync(gradlePath, "utf8");
-      const match = gradleContent.match(/versionName\s+"([\d.]+)"/);
-      if (match && match[1]) return match[1];
-      console.warn("⚠️ Could not find versionName in build.gradle.");
+      if (selection?.version) return selection.version;
+
+      const metadata = getAndroidProjectMetadata();
+      if (metadata?.defaultConfig.version) return metadata.defaultConfig.version;
+      console.warn("⚠️ Could not find Android versionName in build.gradle.");
     } else if (platform === "ios") {
-      const iosDir = path.join(projectRoot, "ios");
-      if (!fs.existsSync(iosDir)) {
-        console.warn(`⚠️ iOS folder not found at ${iosDir}`);
-        return null;
-      }
+      if (selection?.version) return selection.version;
 
-      function findXcodeProj(dir) {
-        const files = fs.readdirSync(dir);
-        for (const f of files) {
-          const fullPath = path.join(dir, f);
-          if (fs.statSync(fullPath).isDirectory()) {
-            if (f.endsWith(".xcodeproj")) return fullPath;
-            const nested = findXcodeProj(fullPath);
-            if (nested) return nested;
-          }
-        }
-        return null;
-      }
-
-      const xcodeProjPath = findXcodeProj(iosDir);
-      if (!xcodeProjPath) {
-        console.warn("⚠️ .xcodeproj not found inside ios directory.");
-        return null;
-      }
-
-      const pbxprojPath = path.join(xcodeProjPath, "project.pbxproj");
-      if (!fs.existsSync(pbxprojPath)) {
-        console.warn("⚠️ project.pbxproj not found.");
-        return null;
-      }
-
-      const pbxprojContent = fs.readFileSync(pbxprojPath, "utf8");
-      const match = pbxprojContent.match(/MARKETING_VERSION\s*=\s*([\d.]+);/);
-      if (match && match[1]) return match[1];
+      const metadata = getIosProjectMetadata();
+      if (metadata?.defaultConfig.version) return metadata.defaultConfig.version;
       console.warn("⚠️ Could not find MARKETING_VERSION in project.pbxproj.");
     }
   } catch (err) {
@@ -239,7 +600,24 @@ function getPlatformAppVersion(platform) {
 async function getPlatformConfig(platform) {
   console.log(`\n⚙️  Enter configuration for ${platform.toUpperCase()}\n`);
 
-  let detectedVersion = getPlatformAppVersion(platform);
+  const selection =
+    platform === "android"
+      ? await getAndroidFlavorSelection()
+      : platform === "ios"
+        ? await getIosTargetSelection()
+        : null;
+
+  if (platform === "android" && selection?.label) {
+    console.log(
+      `📦 Selected Android flavor: ${selection.label} (${selection.appId})`,
+    );
+  }
+
+  if (platform === "ios" && selection?.label) {
+    console.log(`🍎 Selected iOS target: ${selection.label} (${selection.appId})`);
+  }
+
+  let detectedVersion = getPlatformAppVersion(platform, selection);
   if (detectedVersion) {
     console.log(`📱 Detected ${platform} version: ${detectedVersion}`);
   } else {
@@ -255,7 +633,12 @@ async function getPlatformConfig(platform) {
     default: false,
   });
 
-  return { VERSION: detectedVersion, FORCE_UPDATE };
+  return {
+    VERSION: detectedVersion,
+    FORCE_UPDATE,
+    APP_ID: selection?.appId ?? getAppId(),
+    FLAVOR: selection?.name ?? null,
+  };
 }
 
 function getAppId() {
@@ -283,28 +666,58 @@ function getAppVersion() {
   return pkg.version || "0.0.0";
 }
 
-function getLatestCapgoZip() {
-  const appId = getAppId();
-  const version = getAppVersion();
-  const expectedPrefix = `${appId}_${version}`;
-
+async function getLatestCapgoZip({ appId, version }) {
   const files = fs.readdirSync(process.cwd());
-  const zipFiles = files.filter(
-    (f) => f.endsWith(".zip") && f.startsWith(expectedPrefix),
-  );
+  const zipFiles = files.filter((file) => file.endsWith(".zip"));
 
   if (!zipFiles.length) {
-    console.error(`❌ No Capgo bundle zip found matching: ${expectedPrefix}`);
+    console.error("❌ No Capgo bundle zip found in the current project.");
     process.exit(1);
   }
 
-  zipFiles.sort(
+  const sortedZipFiles = zipFiles.sort(
     (a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime(),
   );
-  return path.join(process.cwd(), zipFiles[0]);
+
+  if (appId && version) {
+    const expectedPrefix = `${appId}_${version}`;
+    const matchedFiles = sortedZipFiles.filter((file) =>
+      file.startsWith(expectedPrefix),
+    );
+
+    if (matchedFiles.length === 1) {
+      return path.join(process.cwd(), matchedFiles[0]);
+    }
+
+    if (matchedFiles.length > 1) {
+      const selectedZip = await select({
+        message: `Multiple Capgo bundles found for ${expectedPrefix}. Select one:`,
+        choices: matchedFiles.map((file) => ({ name: file, value: file })),
+      });
+      return path.join(process.cwd(), selectedZip);
+    }
+
+    console.warn(
+      `⚠️ No generated zip matched ${expectedPrefix}. Please choose the correct bundle file.`,
+    );
+  }
+
+  if (sortedZipFiles.length === 1) {
+    return path.join(process.cwd(), sortedZipFiles[0]);
+  }
+
+  const selectedZip = await select({
+    message: "Select the generated Capgo bundle zip:",
+    choices: sortedZipFiles.slice(0, 10).map((file) => ({
+      name: file,
+      value: file,
+    })),
+  });
+
+  return path.join(process.cwd(), selectedZip);
 }
 
-function buildBundle(buildCommand) {
+async function buildBundle(buildCommand, bundleMetadata) {
   console.log("📦 Building web app and Capgo bundle...");
 
   // Build web app once
@@ -314,7 +727,7 @@ function buildBundle(buildCommand) {
   run("npx @capgo/cli@latest bundle zip");
 
   // Detect generated zip
-  const outputPath = getLatestCapgoZip();
+  const outputPath = await getLatestCapgoZip(bundleMetadata);
   console.log(`✅ Bundle created at ${outputPath}`);
   return outputPath;
 }
@@ -331,32 +744,47 @@ function buildBundle(buildCommand) {
 
     const [platformArg, envSuffix] = rawArg.split(":");
 
-    // Get common config once
     const commonConfig = await getCommonConfig();
+    const platformConfigs = {};
+
+    if (platformArg === "android" || platformArg === "all") {
+      platformConfigs.android = await getPlatformConfig("android");
+    }
+
+    if (platformArg === "ios" || platformArg === "all") {
+      platformConfigs.ios = await getPlatformConfig("ios");
+    }
 
     const buildCommand = envSuffix
       ? `npm run build:${envSuffix}`
       : "npm run build";
-    // Build bundle once
-    const bundleFile = buildBundle(buildCommand);
+
+    const bundleFile = await buildBundle(buildCommand, {
+      appId:
+        platformConfigs.android?.APP_ID ??
+        platformConfigs.ios?.APP_ID ??
+        getAppId(),
+      version:
+        platformConfigs.android?.VERSION ??
+        platformConfigs.ios?.VERSION ??
+        getAppVersion(),
+    });
 
     // Android upload
     if (platformArg === "android" || platformArg === "all") {
-      const androidConfig = await getPlatformConfig("android");
       await uploadBundle({
         filePath: bundleFile,
         platform: "android",
-        config: { ...commonConfig, ...androidConfig },
+        config: { ...commonConfig, ...platformConfigs.android },
       });
     }
 
     // iOS upload
     if (platformArg === "ios" || platformArg === "all") {
-      const iosConfig = await getPlatformConfig("ios");
       await uploadBundle({
         filePath: bundleFile,
         platform: "ios",
-        config: { ...commonConfig, ...iosConfig },
+        config: { ...commonConfig, ...platformConfigs.ios },
       });
     }
 

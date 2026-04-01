@@ -116,7 +116,10 @@ You will be prompted for:
 - API Token
 - Project ID
 - Environment (development / production)
+- Android flavor, when `productFlavors` are present
+- iOS target, when multiple app targets are present
 - Version
+- Bundle zip file, when multiple generated bundles are available
 - Force Update (true/false)
 
 What it does
