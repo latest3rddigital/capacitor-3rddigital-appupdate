@@ -518,9 +518,13 @@ function getIosProjectMetadata() {
 
       if (!preferredConfig) return null;
 
+      const buildConfigurationLabel = preferredConfig.name
+        ? ` [${preferredConfig.name}]`
+        : "";
+
       return {
         name: targetName,
-        label: `${targetName} [${preferredConfig.name ?? "Unknown"}]`,
+        label: `${targetName}${buildConfigurationLabel}`,
         appId: preferredConfig.appId ?? getAppId(),
         version: preferredConfig.version ?? null,
         productName: preferredConfig.productName ?? targetName,
