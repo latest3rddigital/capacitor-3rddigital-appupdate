@@ -66,7 +66,7 @@ export function useCapacitorUpdater(options?: {
 
         const currentBundle = await CapacitorUpdater.current();
         const currentVersion =
-          currentBundle.bundle.version === "builtin"
+          currentBundle.bundle.id === "builtin"
             ? 0
             : Number(currentBundle.bundle.version);
 

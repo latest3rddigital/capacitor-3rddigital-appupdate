@@ -33,7 +33,7 @@
     "@capacitor/app": "^7.1.0",
     "@capacitor/core": "^7.4.3",
     "@capacitor/device": "^7.0.2",
-    "@capgo/capacitor-updater": "^8.45.0",
+    "@capgo/capacitor-updater": "^8.51.3",
     "@inquirer/prompts": "^7.8.6",
     "antd": "^5.27.4",
     "axios": "^1.12.2",
