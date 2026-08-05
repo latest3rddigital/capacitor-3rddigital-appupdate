@@ -9,6 +9,7 @@ const { PutObjectCommand, S3Client } = require("@aws-sdk/client-s3");
 const { v4: uuidv4 } = require("uuid");
 
 const APPUPDATE_BASE_URL = process.env.APPUPDATE_BASE_URL;
+const APPUPDATE_API_KEY = process.env.APPUPDATE_API_KEY;
 const APPUPDATE_AWS_REGION = process.env.APPUPDATE_AWS_REGION;
 const APPUPDATE_AWS_ACCESS_KEY_ID = process.env.APPUPDATE_AWS_ACCESS_KEY_ID;
 const APPUPDATE_AWS_SECRET_ACCESS_KEY =
@@ -120,6 +121,7 @@ async function uploadBundle({ filePath, platform, config }) {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.API_TOKEN}`,
+        "Api-Key": APPUPDATE_API_KEY,
       },
     });
 
@@ -325,7 +327,10 @@ function getAndroidProjectMetadata() {
 
   const gradleContent = fs.readFileSync(gradlePath, "utf8");
   const defaultConfigBlock = extractNamedBlock(gradleContent, "defaultConfig");
-  const productFlavorsBlock = extractNamedBlock(gradleContent, "productFlavors");
+  const productFlavorsBlock = extractNamedBlock(
+    gradleContent,
+    "productFlavors",
+  );
 
   const defaultAppId =
     readQuotedGradleValue(defaultConfigBlock?.content ?? "", "applicationId") ??
@@ -334,21 +339,26 @@ function getAndroidProjectMetadata() {
     readQuotedGradleValue(defaultConfigBlock?.content ?? "", "versionName") ??
     getAppVersion();
 
-  const flavors = parseTopLevelNamedBlocks(productFlavorsBlock?.content ?? "").map(
-    ({ name, content }) => {
-      const flavorAppId = readQuotedGradleValue(content, "applicationId");
-      const flavorAppIdSuffix = readQuotedGradleValue(content, "applicationIdSuffix");
-      const flavorVersion = readQuotedGradleValue(content, "versionName");
-      const flavorVersionSuffix = readQuotedGradleValue(content, "versionNameSuffix");
+  const flavors = parseTopLevelNamedBlocks(
+    productFlavorsBlock?.content ?? "",
+  ).map(({ name, content }) => {
+    const flavorAppId = readQuotedGradleValue(content, "applicationId");
+    const flavorAppIdSuffix = readQuotedGradleValue(
+      content,
+      "applicationIdSuffix",
+    );
+    const flavorVersion = readQuotedGradleValue(content, "versionName");
+    const flavorVersionSuffix = readQuotedGradleValue(
+      content,
+      "versionNameSuffix",
+    );
 
-      return {
-        name,
-        appId: flavorAppId ?? `${defaultAppId}${flavorAppIdSuffix ?? ""}`,
-        version:
-          flavorVersion ?? `${defaultVersion}${flavorVersionSuffix ?? ""}`,
-      };
-    },
-  );
+    return {
+      name,
+      appId: flavorAppId ?? `${defaultAppId}${flavorAppIdSuffix ?? ""}`,
+      version: flavorVersion ?? `${defaultVersion}${flavorVersionSuffix ?? ""}`,
+    };
+  });
 
   return {
     defaultConfig: {
@@ -507,21 +517,33 @@ function getIosProjectMetadata() {
         defaultName: cleanPbxString(
           readPbxValue(configList.body, "defaultConfigurationName"),
         ),
-        buildConfigurations: parsePbxArray(configList.body, "buildConfigurations"),
+        buildConfigurations: parsePbxArray(
+          configList.body,
+          "buildConfigurations",
+        ),
       },
     ]),
   );
 
-  const targetObjects = parsePbxprojObjectsByIsa(pbxprojContent, "PBXNativeTarget");
+  const targetObjects = parsePbxprojObjectsByIsa(
+    pbxprojContent,
+    "PBXNativeTarget",
+  );
   const targets = targetObjects
     .map((target) => {
       const targetName = cleanPbxString(readPbxValue(target.body, "name"));
-      const productType = cleanPbxString(readPbxValue(target.body, "productType"));
+      const productType = cleanPbxString(
+        readPbxValue(target.body, "productType"),
+      );
       const configListId = cleanPbxString(
         readPbxValue(target.body, "buildConfigurationList"),
       )?.match(/^([A-F0-9]{24})/)?.[1];
 
-      if (!targetName || !configListId || !isAppLikeTarget(targetName, productType)) {
+      if (
+        !targetName ||
+        !configListId ||
+        !isAppLikeTarget(targetName, productType)
+      ) {
         return null;
       }
 
@@ -532,7 +554,9 @@ function getIosProjectMetadata() {
           .filter(Boolean) ?? [];
 
       const preferredConfig =
-        buildConfigs.find((config) => config.name === configList?.defaultName) ??
+        buildConfigs.find(
+          (config) => config.name === configList?.defaultName,
+        ) ??
         buildConfigs.find((config) => config.name === "Release") ??
         buildConfigs[0];
 
@@ -571,7 +595,8 @@ function getIosProjectMetadata() {
 
   const uniqueTargets = targets.filter(
     (target, index, allTargets) =>
-      allTargets.findIndex((candidate) => candidate.name === target.name) === index,
+      allTargets.findIndex((candidate) => candidate.name === target.name) ===
+      index,
   );
 
   return {
@@ -615,13 +640,15 @@ function getPlatformAppVersion(platform, selection) {
       if (selection?.version) return selection.version;
 
       const metadata = getAndroidProjectMetadata();
-      if (metadata?.defaultConfig.version) return metadata.defaultConfig.version;
+      if (metadata?.defaultConfig.version)
+        return metadata.defaultConfig.version;
       console.warn("⚠️ Could not find Android versionName in build.gradle.");
     } else if (platform === "ios") {
       if (selection?.version) return selection.version;
 
       const metadata = getIosProjectMetadata();
-      if (metadata?.defaultConfig.version) return metadata.defaultConfig.version;
+      if (metadata?.defaultConfig.version)
+        return metadata.defaultConfig.version;
       console.warn("⚠️ Could not find MARKETING_VERSION in project.pbxproj.");
     }
   } catch (err) {
@@ -648,7 +675,9 @@ async function getPlatformConfig(platform) {
   }
 
   if (platform === "ios" && selection?.label) {
-    console.log(`🍎 Selected iOS target: ${selection.label} (${selection.appId})`);
+    console.log(
+      `🍎 Selected iOS target: ${selection.label} (${selection.appId})`,
+    );
   }
 
   let detectedVersion = getPlatformAppVersion(platform, selection);

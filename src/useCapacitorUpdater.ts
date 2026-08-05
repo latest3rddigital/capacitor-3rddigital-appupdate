@@ -9,6 +9,7 @@ export function useCapacitorUpdater(options?: {
   baseUrl: string;
   iosPackage?: string;
   androidPackage?: string;
+  projectKey?: string;
   apiKey?: string;
   showProgress?: boolean;
   onProgress?: (percent: number) => void;
@@ -17,6 +18,13 @@ export function useCapacitorUpdater(options?: {
   const [isUpdateModalVisible, setUpdateModalVisible] = useState(false);
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
   const [progress, setProgress] = useState<number>(0);
+
+  const getHeaders = (apiKey?: string) => {
+    return {
+      "Content-Type": "application/json",
+      "Api-Key": apiKey ?? "",
+    };
+  };
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
@@ -35,8 +43,9 @@ export function useCapacitorUpdater(options?: {
 
         const response = await CapacitorHttp.get({
           url: `${APPUPDATE_BASE_URL}/projects/get-bundle`,
+          headers: getHeaders(options?.apiKey),
           params: {
-            key: options?.apiKey ?? "",
+            key: options?.projectKey ?? "",
             iosPackage: options?.iosPackage ?? "",
             androidPackage: options?.androidPackage ?? "",
           },
@@ -95,7 +104,12 @@ export function useCapacitorUpdater(options?: {
     return () => {
       if (downloadListener) downloadListener.remove();
     };
-  }, [options?.apiKey, options?.iosPackage, options?.androidPackage]);
+  }, [
+    options?.apiKey,
+    options?.projectKey,
+    options?.iosPackage,
+    options?.androidPackage,
+  ]);
 
   const handleUpdate = async (info = updateInfo) => {
     if (!info) return;
@@ -109,7 +123,7 @@ export function useCapacitorUpdater(options?: {
 
       await CapacitorHttp.post({
         url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
-        headers: { "Content-Type": "application/json" },
+        headers: getHeaders(options?.apiKey),
         data: { status: "success" },
       });
 
@@ -123,7 +137,7 @@ export function useCapacitorUpdater(options?: {
       const deviceinfo = await Device.getInfo();
       await CapacitorHttp.post({
         url: `${APPUPDATE_BASE_URL}/bundles/${info.bundleId}/count`,
-        headers: { "Content-Type": "application/json" },
+        headers: getHeaders(options?.apiKey),
         data: {
           status: "failure",
           error: err?.message ?? "Failed to install update.",

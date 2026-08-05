@@ -39,9 +39,10 @@ import { UpdaterModal, useCapacitorUpdater } from "capacitor-3rddigital-appupdat
 const App = () => {
   const { isUpdateModalVisible, updateInfo, handleUpdate, setUpdateModalVisible } = useCapacitorUpdater({
     baseUrl: 'https://your-api-url.com',
+    projectKey: 'YOUR_PROJECT_KEY',
+    apiKey: 'YOUR_API_KEY',
     iosPackage: "com.example.ios",
     androidPackage: "com.example.android",
-    apiKey: "example-key",
     showProgress: true,
     onProgress: (p) => console.log(`Progress: ${p}%`),
   });
@@ -66,9 +67,21 @@ export default App;
 
 ## ⚙️ API Reference
 
-🔹 useCapacitorUpdater(options?: { baseUrl: string; iosPackage?: string; androidPackage?: string; apiKey: string; showProgress?: boolean; onProgress?: (percent: number) => void })
+🔹 useCapacitorUpdater(options?: { baseUrl: string; iosPackage?: string; androidPackage?: string; projectKey: string; apiKey: string; showProgress?: boolean; onProgress?: (percent: number) => void })
 
 - Checks the server for available updates and manages the modal prompt.
+
+Options:
+
+| Key              | Type     | Required | Description                                             |
+| ---------------- | -------- | -------- | ------------------------------------------------------- |
+| `baseUrl`        | string   | ✅       | Base url for app update                                 |
+| `projectKey`     | string   | ✅       | Project key to identify the app on your update server   |
+| `apiKey`         | string   | ✅       | API key sent in the `Api-Key` header for authentication |
+| `iosPackage`     | string   | ❌       | iOS bundle/package identifier                           |
+| `androidPackage` | string   | ❌       | Android bundle/package identifier                       |
+| `showProgress`   | boolean  | ❌       | Show real-time download percentage                      |
+| `onProgress`     | function | ❌       | Callback invoked with download progress percentage      |
 
 Returns:
 
@@ -103,7 +116,20 @@ Props:
 
 - This package provides a CLI for building & uploading OTA bundles.
 
-Build & Upload
+### Environment Variables
+
+The CLI reads the following environment variables from your `.env` file:
+
+| Variable                          | Description                                                    |
+| --------------------------------- | -------------------------------------------------------------- |
+| `APPUPDATE_BASE_URL`              | Base URL of your update server                                 |
+| `APPUPDATE_API_KEY`               | API key used for authentication (sent in the `Api-Key` header) |
+| `APPUPDATE_AWS_REGION`            | AWS region for S3 uploads                                      |
+| `APPUPDATE_AWS_ACCESS_KEY_ID`     | AWS access key ID for S3 uploads                               |
+| `APPUPDATE_AWS_SECRET_ACCESS_KEY` | AWS secret access key for S3 uploads                           |
+| `APPUPDATE_AWS_BUCKET_NAME`       | AWS S3 bucket name for bundle storage                          |
+
+### Build & Upload
 
 ```sh
 npx appupdate android
