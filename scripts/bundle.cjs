@@ -410,19 +410,27 @@ async function getAndroidFlavorSelection() {
 }
 
 function parsePbxprojObjectsByIsa(pbxprojContent, isa) {
-  const objectRegex = new RegExp(
-    `([A-F0-9]{24}) /\\* ([^*]+) \\*/ = \\{[\\s\\S]*?isa = ${isa};([\\s\\S]*?)\\n\\s*\\};`,
-    "g",
-  );
+  const headerRegex = /([A-F0-9]{24})\s*(?:\/\*\s*([^*]+?)\s*\*\/)?\s*=\s*\{/g;
   const objects = [];
   let match;
 
-  while ((match = objectRegex.exec(pbxprojContent)) !== null) {
-    objects.push({
-      id: match[1],
-      comment: match[2].trim(),
-      body: match[3],
-    });
+  while ((match = headerRegex.exec(pbxprojContent)) !== null) {
+    const id = match[1];
+    const comment = match[2]?.trim() ?? "";
+    const braceIndex = match.index + match[0].lastIndexOf("{");
+    const block = extractBracedBlock(pbxprojContent, braceIndex);
+    if (!block) continue;
+
+    headerRegex.lastIndex = block.end + 1;
+
+    const isaMatch = block.content.match(/\bisa\s*=\s*([^;]+);/);
+    if (isaMatch && cleanPbxString(isaMatch[1]) === isa) {
+      objects.push({
+        id,
+        comment,
+        body: block.content,
+      });
+    }
   }
 
   return objects;
@@ -435,7 +443,7 @@ function readPbxValue(body, key) {
 
 function cleanPbxString(value) {
   if (!value) return null;
-  return value.replace(/^"(.*)"$/, "$1").trim();
+  return value.replace(/^["'](.*)["']$/, "$1").trim();
 }
 
 function parsePbxArray(body, key) {
