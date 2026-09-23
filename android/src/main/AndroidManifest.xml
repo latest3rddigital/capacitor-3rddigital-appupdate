@@ -1,0 +1,53 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Required to download the APK from S3 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Required to install an APK outside of a store (install unknown apps, Android 8+).
+         Special-access permission: CANNOT be auto-granted, but the user does NOT
+         need a Settings trip in the default flow - the system installer shows its
+         own inline "Allow from this source" prompt and resumes the install itself.
+         Only needed when `preflightInstallPermission: true` is used. -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Allows a silent self-update (no confirmation dialog) on Android 12+.
+         Install-time permission, auto-granted: NO user toggle, NO Settings trip. -->
+    <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- Fallback notification ("Update installed - tap to open") on Android 13+.
+         Runtime permission: granted via a standard in-app system dialog
+         (see ApkUpdater.requestNotificationPermission()), NOT via Settings.
+         On Android 12 and below it is auto-granted. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application>
+        <!-- Receives install status callbacks from the system PackageInstaller -->
+        <receiver
+            android:name="com.thirddigital.appupdate.ApkInstallStatusReceiver"
+            android:exported="false" />
+
+        <!-- Fired by AlarmManager after a successful self-update to reopen the app -->
+        <receiver
+            android:name="com.thirddigital.appupdate.ApkRelaunchAlarmReceiver"
+            android:exported="false" />
+
+        <!-- Fires in the NEWLY installed package after any replace (covers the
+             system-installer ACTION_VIEW fallback where no status callback fires).
+             Must be exported so the system can deliver it on Android 12+. -->
+        <receiver
+            android:name="com.thirddigital.appupdate.ApkPackageReplacedReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Shares the downloaded APK with the system installer (fallback intent flow) -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.appupdate.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/apk_updater_file_paths" />
+        </provider>
+    </application>
+</manifest>

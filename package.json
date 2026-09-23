@@ -19,7 +19,9 @@
     "react",
     "ota",
     "update",
-    "hot-reload"
+    "hot-reload",
+    "apk",
+    "in-app-update"
   ],
   "author": "Sagar Bhavsar",
   "license": "MIT",
@@ -28,6 +30,11 @@
     "url": "https://github.com/latest3rddigital/capacitor-3rddigital-appupdate/issues"
   },
   "homepage": "https://github.com/latest3rddigital/capacitor-3rddigital-appupdate#readme",
+  "capacitor": {
+    "android": {
+      "src": "android"
+    }
+  },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.995.0",
     "@capacitor/app": "^7.1.0",
@@ -51,10 +58,13 @@
     "typescript": "^5.9.3"
   },
   "bin": {
-    "appupdate": "./scripts/bundle.cjs"
+    "appupdate": "./scripts/bundle.cjs",
+    "appupdate-apk": "./scripts/apk.cjs"
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "android",
+    "scripts"
   ]
 }

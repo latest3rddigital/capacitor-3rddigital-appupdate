@@ -30,17 +30,20 @@ function DecriptEnv(wrappedKey) {
   return result;
 }
 
-const s3Client = new S3Client({
-  region: DecriptEnv(APPUPDATE_AWS_REGION),
-  credentials: {
-    accessKeyId: DecriptEnv(APPUPDATE_AWS_ACCESS_KEY_ID),
-    secretAccessKey: DecriptEnv(APPUPDATE_AWS_SECRET_ACCESS_KEY),
-  },
-  requestChecksumCalculation: "WHEN_REQUIRED",
-  responseChecksumValidation: "WHEN_REQUIRED",
-});
+function createS3Client() {
+  return new S3Client({
+    region: DecriptEnv(APPUPDATE_AWS_REGION),
+    credentials: {
+      accessKeyId: DecriptEnv(APPUPDATE_AWS_ACCESS_KEY_ID),
+      secretAccessKey: DecriptEnv(APPUPDATE_AWS_SECRET_ACCESS_KEY),
+    },
+    requestChecksumCalculation: "WHEN_REQUIRED",
+    responseChecksumValidation: "WHEN_REQUIRED",
+  });
+}
 
 async function uploadFileToS3(filePath, bucketName, folder) {
+  const s3Client = createS3Client();
   const fileName = path.basename(filePath);
   const cleanFileName = fileName.replace(/\s+/g, "_");
   const uniqueId = uuidv4();
@@ -72,13 +75,93 @@ async function uploadFileToS3(filePath, bucketName, folder) {
   }
 }
 
-function run(command) {
+function normalizeBaseUrl(url) {
+  return String(url || "").trim().replace(/\/+$/, "");
+}
+
+function joinUrl(base, route) {
+  const cleanBase = normalizeBaseUrl(base);
+  const cleanRoute = route.startsWith("/") ? route : `/${route}`;
+  return `${cleanBase}${cleanRoute}`;
+}
+
+function validateEnvConfig() {
+  const missing = [];
+  if (!APPUPDATE_BASE_URL) missing.push("APPUPDATE_BASE_URL");
+  if (!APPUPDATE_API_KEY) missing.push("APPUPDATE_API_KEY");
+  if (!APPUPDATE_AWS_REGION) missing.push("APPUPDATE_AWS_REGION");
+  if (!APPUPDATE_AWS_ACCESS_KEY_ID) missing.push("APPUPDATE_AWS_ACCESS_KEY_ID");
+  if (!APPUPDATE_AWS_SECRET_ACCESS_KEY) missing.push("APPUPDATE_AWS_SECRET_ACCESS_KEY");
+  if (!APPUPDATE_AWS_BUCKET_NAME) missing.push("APPUPDATE_AWS_BUCKET_NAME");
+  if (missing.length) {
+    console.error(`❌ Missing required environment variables: ${missing.join(", ")}`);
+    console.error("   Add them to a .env file in your app root (see .env.example in capacitor-3rddigital-appupdate).");
+    process.exit(1);
+  }
+}
+
+function getProjectRoot() {
+  const cwd = process.cwd();
+  try {
+    if (fs.existsSync(path.join(cwd, "package.json"))) return cwd;
+  } catch {
+    // fall through
+  }
+  let dir = path.resolve(__dirname);
+  const root = path.parse(dir).root;
+  while (dir !== root) {
+    if (fs.existsSync(path.join(dir, "package.json")) && !dir.includes("node_modules")) return dir;
+    if (path.basename(dir) === "node_modules") return path.resolve(dir, "..");
+    dir = path.resolve(dir, "..");
+  }
+  return cwd;
+}
+
+function readPackageScripts(projectRoot) {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+    return pkg.scripts && typeof pkg.scripts === "object" ? pkg.scripts : {};
+  } catch {
+    return {};
+  }
+}
+
+function resolveWebBuildCommand(projectRoot, envSuffix) {
+  const scripts = readPackageScripts(projectRoot);
+  const candidates = envSuffix ? [`build:${envSuffix}`, "build"] : ["build"];
+  for (const name of candidates) {
+    if (scripts[name]) {
+      if (envSuffix && name === "build") {
+        console.warn(`⚠️ No "build:${envSuffix}" script in package.json - falling back to "npm run build".`);
+      }
+      return `npm run ${name}`;
+    }
+  }
+  console.error(
+    `❌ No web-build script found in ${path.join(projectRoot, "package.json")}.\n` +
+      `   Expected one of: ${candidates.map((c) => `"${c}"`).join(", ")}.\n` +
+      `   Add a "build" script (e.g. "vite build") or pass an env matching an existing script.`,
+  );
+  process.exit(1);
+}
+
+function run(command, options = {}) {
   try {
     console.log(`\n➡️ Running: ${command}\n`);
-    execSync(command, { stdio: "inherit" });
+    execSync(command, {
+      stdio: "inherit",
+      cwd: options.cwd || process.cwd(),
+      env: options.env || process.env,
+    });
   } catch (err) {
     console.error(`❌ Command failed: ${command}`);
     console.error(err.message);
+    if (/npm run build/.test(command)) {
+      console.error('   Hint: make sure that build script exists in the app package.json (e.g. "build", "build:dev").');
+    }
+    if (/cap sync|capgo/.test(command)) {
+      console.error("   Hint: run this from the app root and ensure @capacitor/cli / @capgo/cli are installed.");
+    }
     process.exit(1);
   }
 }
@@ -117,7 +200,7 @@ async function uploadBundle({ filePath, platform, config }) {
       fileSize: stats.size,
     };
 
-    const res = await axios.post(`${APPUPDATE_BASE_URL}/bundles`, payload, {
+    const res = await axios.post(joinUrl(APPUPDATE_BASE_URL, "/bundles"), payload, {
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${config.API_TOKEN}`,
@@ -286,22 +369,6 @@ function readQuotedGradleValue(blockContent, key) {
     new RegExp(`\\b${key}\\b\\s+["']([^"']+)["']`),
   );
   return match?.[1] ?? null;
-}
-
-function getProjectRoot() {
-  let projectRoot = path.resolve(__dirname);
-  while (
-    projectRoot.includes("node_modules") &&
-    !fs.existsSync(path.join(projectRoot, "package.json"))
-  ) {
-    projectRoot = path.resolve(projectRoot, "..");
-  }
-
-  if (projectRoot.includes("node_modules")) {
-    projectRoot = path.resolve(projectRoot, "../../");
-  }
-
-  return projectRoot;
 }
 
 function findFirstXcodeProj(dir) {
@@ -737,8 +804,9 @@ function getAppVersion() {
   return pkg.version || "0.0.0";
 }
 
-async function getLatestCapgoZip({ appId, version }) {
-  const files = fs.readdirSync(process.cwd());
+async function getLatestCapgoZip({ appId, version }, projectRoot) {
+  const root = projectRoot || process.cwd();
+  const files = fs.readdirSync(root);
   const zipFiles = files.filter((file) => file.endsWith(".zip"));
 
   if (!zipFiles.length) {
@@ -747,7 +815,9 @@ async function getLatestCapgoZip({ appId, version }) {
   }
 
   const sortedZipFiles = zipFiles.sort(
-    (a, b) => fs.statSync(b).mtime.getTime() - fs.statSync(a).mtime.getTime(),
+    (a, b) =>
+      fs.statSync(path.join(root, b)).mtime.getTime() -
+      fs.statSync(path.join(root, a)).mtime.getTime(),
   );
 
   if (appId && version) {
@@ -757,7 +827,7 @@ async function getLatestCapgoZip({ appId, version }) {
     );
 
     if (matchedFiles.length === 1) {
-      return path.join(process.cwd(), matchedFiles[0]);
+      return path.join(root, matchedFiles[0]);
     }
 
     if (matchedFiles.length > 1) {
@@ -765,7 +835,7 @@ async function getLatestCapgoZip({ appId, version }) {
         message: `Multiple Capgo bundles found for ${expectedPrefix}. Select one:`,
         choices: matchedFiles.map((file) => ({ name: file, value: file })),
       });
-      return path.join(process.cwd(), selectedZip);
+      return path.join(root, selectedZip);
     }
 
     console.warn(
@@ -774,7 +844,7 @@ async function getLatestCapgoZip({ appId, version }) {
   }
 
   if (sortedZipFiles.length === 1) {
-    return path.join(process.cwd(), sortedZipFiles[0]);
+    return path.join(root, sortedZipFiles[0]);
   }
 
   const selectedZip = await select({
@@ -785,20 +855,20 @@ async function getLatestCapgoZip({ appId, version }) {
     })),
   });
 
-  return path.join(process.cwd(), selectedZip);
+  return path.join(root, selectedZip);
 }
 
-async function buildBundle(buildCommand, bundleMetadata) {
+async function buildBundle(buildCommand, bundleMetadata, projectRoot) {
   console.log("📦 Building web app and Capgo bundle...");
 
   // Build web app once
-  run(buildCommand);
+  run(buildCommand, { cwd: projectRoot });
 
   // Create Capgo zip
-  run("npx @capgo/cli@latest bundle zip");
+  run("npx @capgo/cli@latest bundle zip", { cwd: projectRoot });
 
   // Detect generated zip
-  const outputPath = await getLatestCapgoZip(bundleMetadata);
+  const outputPath = await getLatestCapgoZip(bundleMetadata, projectRoot);
   console.log(`✅ Bundle created at ${outputPath}`);
   return outputPath;
 }
@@ -806,14 +876,37 @@ async function buildBundle(buildCommand, bundleMetadata) {
 (async () => {
   try {
     const rawArg = process.argv[2];
-    if (!rawArg) {
-      console.error(
-        "❌ Please specify a platform: android | ios | all (e.g., all:dev)",
+    if (!rawArg || ["-h", "--help", "help"].includes(rawArg)) {
+      console.log(
+        [
+          "",
+          "3rdDigital AppUpdate - OTA bundle CLI",
+          "",
+          "Usage:",
+          "  npx appupdate android | ios | all            # build with `npm run build`",
+          "  npx appupdate all:dev | android:live         # build with `npm run build:<env>`",
+          "",
+        ].join("\n"),
       );
-      process.exit(1);
+      if (!rawArg) process.exit(1);
+      return;
     }
 
-    const [platformArg, envSuffix] = rawArg.split(":");
+    validateEnvConfig();
+    const projectRoot = getProjectRoot();
+    const [platformArg, envSuffix] = (() => {
+      // Only the FIRST colon separates the platform from the env suffix, so
+      // `all:dev:test` -> platform "all", suffix "dev:test" (npm run build:dev:test).
+      const separatorIndex = rawArg.indexOf(":");
+      return separatorIndex === -1
+        ? [rawArg, undefined]
+        : [rawArg.slice(0, separatorIndex), rawArg.slice(separatorIndex + 1)];
+    })();
+
+    if (!["android", "ios", "all"].includes(platformArg)) {
+      console.error(`❌ Unknown platform "${platformArg}". Use android | ios | all (e.g. all:dev).`);
+      process.exit(1);
+    }
 
     const commonConfig = await getCommonConfig();
     const platformConfigs = {};
@@ -826,9 +919,9 @@ async function buildBundle(buildCommand, bundleMetadata) {
       platformConfigs.ios = await getPlatformConfig("ios");
     }
 
-    const buildCommand = envSuffix
-      ? `npm run build:${envSuffix}`
-      : "npm run build";
+    // Validates the script exists first (previously a missing build:xxx
+    // surfaced only as a bare "Command failed").
+    const buildCommand = resolveWebBuildCommand(projectRoot, envSuffix);
 
     const bundleFile = await buildBundle(buildCommand, {
       appId:
@@ -839,7 +932,7 @@ async function buildBundle(buildCommand, bundleMetadata) {
         platformConfigs.android?.VERSION ??
         platformConfigs.ios?.VERSION ??
         getAppVersion(),
-    });
+    }, projectRoot);
 
     // Android upload
     if (platformArg === "android" || platformArg === "all") {

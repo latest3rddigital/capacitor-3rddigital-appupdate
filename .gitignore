@@ -1,6 +1,7 @@
 node_modules/
 dist/
 build/
+.gradle/
 .vscode/
 .idea/
 .DS_Store
@@ -8,4 +9,5 @@ build/
 .env.*
 !.env.example
 *.log
+*.tgz
 coverage/
