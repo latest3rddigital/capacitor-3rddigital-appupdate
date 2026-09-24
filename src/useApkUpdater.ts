@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { ApkUpdater } from "./apkPlugin.js";
 import type {
   ApkInstallStateInfo,
+  ApkPermissionStatus,
   ApkProgressInfo,
   ApkUpdateInfo,
   ApkUpdatePhase,
@@ -128,21 +129,25 @@ function clearPendingInfo() {
  * and the consuming project renders its own modal/progress screen - the same
  * pattern as `useCapacitorUpdater` + the AppUpdate UI.
  *
- * Flow:
- * 1. Reads the installed app info, asks the server for the latest APK.
- * 2. If the server versionCode is higher, shows the update modal (or
- *    auto-starts on `forceUpdate`).
+ * Permission-first flow (all Android versions):
+ * 1. On app open, call `ensureApkPermissions()` (or read
+ *    `apkPermissionStatus`). It checks BOTH "Install unknown apps"
+ *    (REQUIRED to install any APK) and "Display over other apps"
+ *    (best-effort helper so the app can reopen itself after the OS kills it
+ *    for the install). Neither can be granted programmatically, so the
+ *    plugin shows its NATIVE permission dialog - ONE Android dialog built
+ *    from the host app's theme and logo (it looks like a system permission
+ *    popup, so no per-project UI is needed) that lists BOTH permissions
+ *    together; Continue opens the app's **App info page** where both toggles
+ *    live, so the user enables everything in one place and returns once.
+ *    The update popup (`isApkUpdateModalVisible`) only appears once the
+ *    permission gate passes, so the user never sees "update available"
+ *    before the app is actually able to install it.
  * 3. `handleApkUpdate()` downloads the APK (progress events), then commits
- *    the PackageInstaller session.
- * 4. The "install unknown apps" permission is NOT pre-checked by default: the
- *    system installer shows its own inline prompt and resumes the install by
- *    itself once the user grants it - no round trip back to this app, no
- *    reopening the app to see the popup. (Optional preflight via
- *    `preflightInstallPermission`; the flow auto-resumes on return either way.)
- * 5. After the install the OS kills the process; on relaunch the stored target
- *    versionCode is compared with the installed one and `onUpdateSuccess` /
- *    `apkUpdateJustCompleted` fire exactly once, so the app can show its
- *    "App updated successfully" message - same as the bundle/AppUpdate flow.
+ *    the PackageInstaller session. After the install the OS kills the
+ *    process; on relaunch the stored target versionCode is compared with the
+ *    installed one and `onUpdateSuccess` / `apkUpdateJustCompleted` fire
+ *    exactly once ("App updated successfully" - same as bundle flow).
  *
  * Does nothing on iOS or web.
  */
@@ -159,6 +164,8 @@ export function useApkUpdater(options?: {
   rejectDebugApkOnRelease?: boolean;
   /** Called when such an update is blocked client-side. */
   onBlockedUpdate?: (info: ApkUpdateInfo, reason: string) => void;
+  /** Called when the user comes back with both permissions granted. */
+  onPermissionsGranted?: () => void;
   /** @deprecated Progress events are always delivered now; kept for compatibility. */
   showProgress?: boolean;
   /** Called with the overall 0-100 progress while downloading/installing. */
@@ -166,7 +173,7 @@ export function useApkUpdater(options?: {
   /** Called whenever the update phase changes. */
   onPhaseChange?: (phase: ApkUpdatePhase, info: ApkProgressInfo) => void;
   onInstallStateChange?: (state: ApkInstallStateInfo) => void;
-  /** Called when the user comes back from Settings with the permission granted. */
+  /** @deprecated Use onPermissionsGranted; kept for compatibility. */
   onInstallPermissionGranted?: () => void;
   /**
    * Called once on the launch after a successful update (the process was
@@ -178,9 +185,11 @@ export function useApkUpdater(options?: {
     versionName?: string;
   }) => void;
   /**
-   * Off by default. When enabled, the flow asks for the "install unknown
-   * apps" permission BEFORE downloading by opening Settings once; on return
-   * the update continues automatically (no reopen / second tap needed).
+   * Permission gate for the APK update flow. Kept for compatibility; the flow
+   * now ALWAYS pre-checks both permissions on app open (install-unknown-apps
+   * REQUIRED, overlay best-effort) using the plugin's NATIVE dialog and only
+   * shows the update popup once ready.
+   * @deprecated Always behaves as `true`; kept so existing code compiles.
    */
   preflightInstallPermission?: boolean;
 }) {
@@ -201,6 +210,8 @@ export function useApkUpdater(options?: {
     null,
   );
   const [canInstall, setCanInstall] = useState<boolean | null>(null);
+  const [apkPermissionStatus, setApkPermissionStatus] =
+    useState<ApkPermissionStatus | null>(null);
 
   // Refs keep the latest values available inside long-lived event listeners
   // without re-registering them on every render.
@@ -217,7 +228,7 @@ export function useApkUpdater(options?: {
   // starts (e.g. a consumer calling `handleApkUpdate()` again after the
   // permission round trip while the auto-resume already continued it).
   const updateActiveRef = useRef(false);
-  // True while parked on the "install unknown apps" Settings screen.
+  // True while parked on the native permission prompt (App info round trip).
   const awaitingPermissionRef = useRef(false);
   const pendingInfoRef = useRef<ApkUpdateInfo | null>(null);
   // Successful download of the current target, reused for instant retries
@@ -450,23 +461,142 @@ export function useApkUpdater(options?: {
     }
   };
 
+  const readPermissionStatus = async (): Promise<ApkPermissionStatus | null> => {
+    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android")
+      return null;
+    try {
+      const status = await ApkUpdater.getPermissionStatus();
+      const ready = status.canInstall && status.canDrawOverlays;
+      const full: ApkPermissionStatus = { ...status, ready };
+      setApkPermissionStatus(full);
+      setCanInstall(status.canInstall);
+      return full;
+    } catch {
+      try {
+        const legacy = await ApkUpdater.canInstall();
+        const full: ApkPermissionStatus = {
+          canInstall: legacy.canInstall,
+          canDrawOverlays: true,
+          ready: legacy.canInstall,
+        };
+        setApkPermissionStatus(full);
+        setCanInstall(legacy.canInstall);
+        return full;
+      } catch {
+        return null;
+      }
+    }
+  };
+
+  /**
+   * Permission-first gate. Call it on app open (before showing any update
+   * UI): checks BOTH "Install unknown apps" (required) and "Display over
+   * other apps" (auto-reopen helper). When something is missing it runs the
+   * plugin's NATIVE permission flow - ONE Android dialog (host app theme +
+   * the app's own logo, so it looks like a system permission popup in every
+   * project and needs no custom UI here) listing BOTH permissions together;
+   * Continue opens the app's App info page where both toggles live, so the
+   * user enables everything in one place and returns once. Returns true
+   * only when the update popup may be shown.
+   */
+  const ensureApkPermissions = async (): Promise<boolean> => {
+    const status = await readPermissionStatus();
+    if (!status) return true;
+    if (status.ready) return true;
+    awaitingPermissionRef.current = true;
+    const info = updateInfoRef.current;
+    if (info) {
+      pendingInfoRef.current = info;
+      persistPendingInfo(info);
+    }
+    emitProgress({ phase: "permission" });
+    try {
+      // Native dialog flow: ONE combined prompt, then the App info page
+      // (both toggles); resolves when the user is back (granted or not).
+      await ApkUpdater.requestUpdatePermissions();
+    } catch (err) {
+      console.warn("[ApkUpdater] Native permission prompt failed:", err);
+    }
+    const fresh = await readPermissionStatus();
+    if (fresh?.ready) {
+      // `resumeUpdateFlow` (appStateChange) normally continued the parked
+      // update the moment the user came back from Settings; this fallback
+      // covers grant paths where no backgrounding happened.
+      if (awaitingPermissionRef.current) {
+        awaitingPermissionRef.current = false;
+        optionsRef.current?.onPermissionsGranted?.();
+        optionsRef.current?.onInstallPermissionGranted?.();
+        const parked = pendingInfoRef.current;
+        pendingInfoRef.current = null;
+        clearPendingInfo();
+        if (parked && !updateActiveRef.current) {
+          updateInfoRef.current = parked;
+          setApkUpdateInfo(parked);
+          if (parked.forceUpdate) {
+            // Force update: never flash the popup - start right into the
+            // progress screen (no-op if an attempt is already running).
+            await handleApkUpdate(parked);
+          } else {
+            setApkUpdateModalVisible(true);
+          }
+        }
+      }
+      if (
+        !updateActiveRef.current &&
+        progressRef.current.phase === "permission"
+      ) {
+        emitProgress({ phase: "idle", stagingPercent: -1 });
+      }
+      return true;
+    }
+    // Declined for now: keep a parked update persisted so the next launch
+    // resumes it as soon as the permissions are granted.
+    awaitingPermissionRef.current = false;
+    if (!updateActiveRef.current && progressRef.current.phase === "permission") {
+      emitProgress({ phase: "idle", stagingPercent: -1 });
+    }
+    return false;
+  };
+
   const handleApkUpdate = async (
     info: ApkUpdateInfo | null = apkUpdateInfo,
   ) => {
     if (!info) return;
     if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android")
       return;
-    // Already running (the auto-resume continued it) - avoid a second download.
     if (updateActiveRef.current) return;
 
+    // Mirror the AppUpdate (bundle) flow: close the popup SYNCHRONOUSLY and
+    // enter the "downloading" phase in the same tick, so the very first paint
+    // is the progress screen. A force update must never flash the popup; a
+    // manual press jumps straight to progress too.
     setApkUpdateModalVisible(false);
     setApkError(null);
+    emitProgress({
+      phase: "downloading",
+      downloadPercent: 0,
+      stagingPercent: -1,
+      bytesWritten: 0,
+      totalBytes: 0,
+      message: undefined,
+    });
+
+    // Permission-first: never start a download while the app cannot install
+    // it yet. The NATIVE permission dialog runs instead; once granted the
+    // update starts automatically (force) or the popup re-appears (optional).
+    try {
+      const status = await readPermissionStatus();
+      if (status && !status.ready) {
+        updateInfoRef.current = info;
+        setApkUpdateInfo(info);
+        await ensureApkPermissions();
+        return;
+      }
+    } catch { /* permission check unavailable - try the update anyway */ }
+
     updateInfoRef.current = info;
-    // New attempt: allow one success + one failure report again.
     reportedRef.current = { success: false, failure: false };
     updateActiveRef.current = true;
-    // Persist the target so a completed update can be detected on relaunch
-    // (the OS kills this process during the install).
     try {
       localStorage.setItem(
         APK_UPDATE_IN_PROGRESS_KEY,
@@ -481,81 +611,44 @@ export function useApkUpdater(options?: {
     }
     clearPendingInfo();
     pendingInfoRef.current = null;
-
-    // Optional: ask for the permission BEFORE downloading. Off by default -
-    // without it the system installer shows its own inline permission prompt
-    // and resumes the install right after the user grants it, so the user
-    // never bounces back to this screen for the popup.
-    if (optionsRef.current?.preflightInstallPermission) {
-      try {
-        const permission = await ApkUpdater.canInstall();
-        setCanInstall(permission.canInstall);
-        if (!permission.canInstall) {
-          awaitingPermissionRef.current = true;
-          pendingInfoRef.current = info;
-          persistPendingInfo(info);
-          emitProgress({ phase: "permission" });
-          await ApkUpdater.openInstallPermissionSettings();
-          // Parked on Settings: `resumeUpdateFlow` continues automatically
-          // as soon as the permission is granted.
-          return;
-        }
-      } catch {
-        // Permission check unavailable - the installer handles it inline.
-      }
-    }
-
     await runUpdate(info);
   };
 
   /**
-   * Runs when the app returns to the foreground. If we were parked on the
-   * "install unknown apps" Settings screen: continue the update automatically
-   * when the permission was granted (no reopen / second tap needed), or stop
-   * waiting and re-offer the update when it was not.
+   * Runs when the app returns to the foreground after the App info round
+   * trip: re-checks BOTH toggles. When granted, closes the parked
+   * permission wait and continues - the update popup for optional updates,
+   * straight into the progress screen for force updates (or resumes a parked
+   * attempt); when not granted, stays parked until the next launch re-prompts.
    */
   const resumeUpdateFlow = async () => {
     if (!awaitingPermissionRef.current) return;
-
-    let granted = false;
-    try {
-      const permission = await ApkUpdater.canInstall();
-      setCanInstall(permission.canInstall);
-      granted = permission.canInstall;
-    } catch {
-      return; // cannot tell yet - stay parked
-    }
-
+    const status = await readPermissionStatus();
+    if (!status) return;
+    if (!status.ready) return; // still missing a toggle - stay parked
     const info = pendingInfoRef.current ?? updateInfoRef.current;
     awaitingPermissionRef.current = false;
     pendingInfoRef.current = null;
     clearPendingInfo();
-
-    if (!granted) {
-      if (updateActiveRef.current) {
-        failUpdate(info, "Install permission was not granted.", "task");
-      }
-      return;
-    }
-
+    optionsRef.current?.onPermissionsGranted?.();
     optionsRef.current?.onInstallPermissionGranted?.();
     const attemptInProgress = !!localStorage.getItem(
       APK_UPDATE_IN_PROGRESS_KEY,
     );
     if (info && attemptInProgress) {
-      // Permission granted while an attempt was parked: continue silently.
       updateActiveRef.current = false;
       await handleApkUpdate(info);
     } else if (updateInfoRef.current) {
-      // No attempt started yet (permission requested up front): re-offer the
-      // update so the user stays in control of the download.
-      setApkUpdateModalVisible(true);
+      if (updateInfoRef.current.forceUpdate) {
+        // Force update: re-offer means restart, never the popup.
+        await handleApkUpdate(updateInfoRef.current);
+      } else {
+        setApkUpdateModalVisible(true);
+      }
     }
   };
 
   useEffect(() => {
-    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android")
-      return;
 
     let listeners: PluginListenerHandle[] = [];
     let cancelled = false;
@@ -644,11 +737,12 @@ export function useApkUpdater(options?: {
         const appInfo = await ApkUpdater.getAppInfo();
         if (cancelled) return;
 
-        try {
-          setCanInstall((await ApkUpdater.canInstall()).canInstall);
-        } catch {
-          setCanInstall(null);
-        }
+        // Permission-first: check BOTH toggles on app open. The update popup
+        // only appears once both are granted (install required, overlay for
+        // auto-reopen). First launch therefore shows the permission prompt -
+        // never the update popup straight after install.
+        const gate = await readPermissionStatus();
+        if (cancelled) return;
 
         // 1) A previous attempt may have completed while this process was
         //    killed by the install - verify and surface the success exactly
@@ -658,33 +752,42 @@ export function useApkUpdater(options?: {
           if (stored) fireSuccess(stored);
         }
 
-        // 2) Resume an interrupted "install unknown apps" wait, if any
-        //    (survives process death while the user was in Settings).
+        // 2) Resume an interrupted permission wait, if any (survives process
+        //    death while the user was on the App info page).
         if (!updateActiveRef.current && !successFiredRef.current) {
           const pendingInfo = readPendingInfo();
           if (pendingInfo) {
             updateInfoRef.current = pendingInfo;
             setApkUpdateInfo(pendingInfo);
-            let granted = false;
-            try {
-              granted = (await ApkUpdater.canInstall()).canInstall;
-              setCanInstall(granted);
-            } catch {
-              granted = false;
-            }
-            if (granted) {
+            const current = gate ?? (await readPermissionStatus());
+            if (current && current.ready) {
               clearPendingInfo();
               awaitingPermissionRef.current = false;
               pendingInfoRef.current = null;
-              await handleApkUpdate(pendingInfo);
+              if (pendingInfo.forceUpdate) {
+                // Force update: never show the popup - go straight to progress.
+                await handleApkUpdate(pendingInfo);
+              } else {
+                setApkUpdateModalVisible(true);
+              }
               return;
             }
-            // Still waiting: continue exactly where we left off (Settings);
-            // `resumeUpdateFlow` takes over when the user comes back.
+            // Still waiting: run the NATIVE permission flow (one shared
+            // system-style dialog covering both permissions); the update
+            // popup only appears once both toggles are granted.
             awaitingPermissionRef.current = true;
             pendingInfoRef.current = pendingInfo;
             emitProgress({ phase: "permission" });
-            await ApkUpdater.openInstallPermissionSettings();
+            const granted = await ensureApkPermissions();
+            if (granted) {
+              clearPendingInfo();
+              if (pendingInfo.forceUpdate) {
+                // Force update: start it directly (no-op if ensure already did).
+                await handleApkUpdate(pendingInfo);
+              } else {
+                setApkUpdateModalVisible(true);
+              }
+            }
             return;
           }
         }
@@ -750,9 +853,28 @@ export function useApkUpdater(options?: {
         if (cancelled || updateActiveRef.current) return;
         updateInfoRef.current = info;
         setApkUpdateInfo(info);
-        setApkUpdateModalVisible(true);
-
-        if (info.forceUpdate) await handleApkUpdate(info);
+        // Permission-first: only show the update popup when both toggles are
+        // granted; otherwise run the NATIVE permission flow (the shared
+        // system-style dialog) and keep the update parked until granted.
+        const ready =
+          gate?.ready ?? (await readPermissionStatus())?.ready ?? true;
+        if (!ready) {
+          pendingInfoRef.current = info;
+          persistPendingInfo(info);
+          awaitingPermissionRef.current = true;
+          setApkUpdateModalVisible(false);
+          await ensureApkPermissions();
+          return;
+        }
+        if (info.forceUpdate) {
+          // Force update: the popup must NEVER flash - don't even set it
+          // visible; handleApkUpdate enters the "downloading" phase in this
+          // same tick, so the first paint is already the progress screen
+          // (same behaviour as the AppUpdate/ bundle flow).
+          await handleApkUpdate(info);
+        } else {
+          setApkUpdateModalVisible(true);
+        }
       } catch (err) {
         console.warn("[ApkUpdater] Failed to fetch update:", err);
       }
@@ -775,14 +897,11 @@ export function useApkUpdater(options?: {
   };
 
   /**
-   * Opens the "install unknown apps" Settings page. When an update is known,
-   * the hook remembers it and continues automatically (or re-offers the
-   * modal) as soon as the user comes back with the permission granted.
-   *
-   * NOTE: only needed when `preflightInstallPermission: true` is used. In the
-   * default flow the system installer shows its own inline
-   * "Allow from this source" prompt and resumes the install itself, so the
-   * user never leaves the app for Settings.
+   * Opens the "install unknown apps" Settings page directly. When an update
+   * is known, the hook remembers it and continues automatically as soon as
+   * the user comes back with the permissions granted. Normally you do not
+   * need this - `ensureApkPermissions()` runs the shared NATIVE permission
+   * dialog for every missing permission by itself.
    */
   const openInstallPermissionSettings = async () => {
     awaitingPermissionRef.current = true;
@@ -862,5 +981,20 @@ export function useApkUpdater(options?: {
     openInstallPermissionSettings,
     canShowUpdateNotification,
     requestNotificationPermission,
+    /**
+     * Combined permission state `{ canInstall, canDrawOverlays, ready }`.
+     * `ready` is true only when BOTH toggles are granted - gate the APK
+     * update popup on it.
+     */
+    apkPermissionStatus,
+    /**
+     * Checks both toggles and, when something is missing, runs the NATIVE
+     * permission dialog flow (host app theme + app logo - no per-project UI).
+     * Returns true when the update popup may be shown. Call on app open
+     * (before any update UI).
+     */
+    ensureApkPermissions,
+    /** Re-reads both toggles without prompting. */
+    refreshApkPermissionStatus: readPermissionStatus,
   };
 }

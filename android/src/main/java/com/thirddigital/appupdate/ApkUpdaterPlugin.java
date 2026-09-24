@@ -1,11 +1,14 @@
 package com.thirddigital.appupdate;
 
+import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageInstaller;
 import android.content.pm.PackageManager;
+import android.graphics.drawable.Drawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Handler;
@@ -44,9 +47,11 @@ import java.util.concurrent.atomic.AtomicBoolean;
  *
  * <p>This is intentionally kept separate from the OTA bundle flow (Capgo) so it
  * never affects iOS or bundle updates. It can report the installed app info,
- * check/request the "install unknown apps" permission, download an APK from a
- * URL (S3) with progress events, install it via the system PackageInstaller
- * (silent self-update on Android 12+ when allowed) and restart the app.</p>
+ * request the special permissions through a NATIVE dialog (host app theme +
+ * logo, so it looks like a system popup in every project - see
+ * {@link #requestUpdatePermissions}), download an APK from a URL (S3) with
+ * progress events, install it via the system PackageInstaller (silent
+ * self-update on Android 12+ when allowed) and restart the app.</p>
  */
 @CapacitorPlugin(
     name = "ApkUpdater",
@@ -102,6 +107,20 @@ public class ApkUpdaterPlugin extends Plugin {
         // The app is actually running again: consume the pending relaunch
         // (cancels the alarm, dismisses the tap-to-open notification).
         ApkRelaunchHelper.onAppLaunched(getContext());
+    }
+
+    /**
+     * Continues the native permission dialog flow after the user comes back
+     * from the App info page.
+     */
+    @Override
+    protected void handleOnResume() {
+        super.handleOnResume();
+        if (!awaitingPermissionSettings) return;
+        awaitingPermissionSettings = false;
+        // Give the Settings toggles a beat to commit, then re-check BOTH
+        // permissions and resolve the flow.
+        mainHandler.postDelayed(() -> continuePermissionFlow(true), 250);
     }
 
     /** Called by {@link ApkInstallStatusReceiver} when the system reports an install status. */
@@ -261,20 +280,228 @@ public class ApkUpdaterPlugin extends Plugin {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Permission prompt - ONE native dialog (host app theme + logo) covering
+    // BOTH special permissions, so consuming projects never need custom UI.
+    // -------------------------------------------------------------------------
+
+    /** Pending JS call while the native permission flow is running (main thread). */
+    private PluginCall permissionCall;
+    /** True while the flow waits for the user to come back from App info. */
+    private volatile boolean awaitingPermissionSettings;
+
+    /**
+     * ONE native dialog for BOTH special permissions ("Install unknown apps"
+     * - required for the update itself - and "Display over other apps" - the
+     * auto-reopen helper). The dialog is a plain Android AlertDialog (app
+     * logo + host app theme, so it looks like a system permission popup in
+     * every project) that lists BOTH messages together; Continue opens the
+     * app's <b>App info page</b> where BOTH toggles live (Android 8+ lists
+     * "Install unknown apps", Android 6+ lists "Display over other apps"), so
+     * the user allows everything in one place and comes back once -
+     * {@link #handleOnResume()} re-checks both toggles and resolves.
+     *
+     * <p>Resolves with the final {@code { canInstall, canDrawOverlays, ready }}
+     * status. Declining ("Not now", or coming back from App info without
+     * granting) resolves with {@code ready: false} - it never rejects, and the
+     * prompt is simply shown again on the next launch while not ready.</p>
+     *
+     * <p>Optional copy overrides: {@code title}, {@code message},
+     * {@code confirmText}, {@code cancelText}.</p>
+     */
+    @PluginMethod
+    public void requestUpdatePermissions(PluginCall call) {
+        if (permissionCall != null) {
+            call.reject("A permission request is already in progress");
+            return;
+        }
+        permissionCall = call;
+        mainHandler.post(() -> continuePermissionFlow(false));
+    }
+
+    /**
+     * Resolves when both toggles are granted; otherwise shows the single
+     * combined dialog. After the App info trip the flow always finishes:
+     * ONE trip is supposed to cover both toggles, re-showing immediately
+     * would nag - the prompt simply runs again on the next launch if still
+     * not ready.
+     *
+     * @param returnedFromSettings true when resuming after the App info trip
+     */
+    private void continuePermissionFlow(boolean returnedFromSettings) {
+        if (permissionCall == null) return;
+        boolean canInstall = canRequestInstalls();
+        boolean canOverlay = canDrawOverlaysNow();
+        if (canInstall && canOverlay) {
+            finishPermissionFlow();
+            return;
+        }
+        if (returnedFromSettings) {
+            finishPermissionFlow();
+            return;
+        }
+        showPermissionDialog(canInstall, canOverlay);
+    }
+
+    /**
+     * The ONE native dialog that describes BOTH permissions together:
+     * host-app theme, the app's own logo and optional copy overrides from
+     * the JS call. There is no per-project UI here - it renders like a
+     * native permission popup in every consuming app. Continue opens the
+     * App info page so the user enables both toggles in one place.
+     *
+     * @param installGranted current state of "Install unknown apps"
+     * @param overlayGranted current state of "Display over other apps"
+     */
+    private void showPermissionDialog(
+            final boolean installGranted,
+            final boolean overlayGranted) {
+        final PluginCall call = permissionCall;
+        if (call == null) return;
+        final Activity activity = getActivity();
+        if (activity == null) {
+            // No UI to prompt with - report the current state instead of hanging.
+            finishPermissionFlow();
+            return;
+        }
+
+        final Context context = getContext();
+        final String appName = context
+                .getApplicationInfo()
+                .loadLabel(context.getPackageManager())
+                .toString();
+        final String title = firstNonEmpty(call.getString("title"), "Allow app updates");
+        final String message = firstNonEmpty(
+                call.getString("message"),
+                "To keep \"" + appName + "\" up to date, allow both permissions on the "
+                        + "next screen:\n\n"
+                        + "1. Install unknown apps - required to install app updates"
+                        + (installGranted ? " (already allowed)." : ".") + "\n"
+                        + "2. Display over other apps - lets the app reopen itself "
+                        + "automatically after an update"
+                        + (overlayGranted ? " (already allowed)." : ".") + "\n\n"
+                        + "Tap Continue, then enable both on this app's App info page.");
+        final String confirmText = firstNonEmpty(call.getString("confirmText"), "Continue");
+        final String cancelText = firstNonEmpty(call.getString("cancelText"), "Not now");
+
+        activity.runOnUiThread(() -> {
+            if (permissionCall == null || getActivity() == null) return;
+            try {
+                new AlertDialog.Builder(getActivity())
+                        .setIcon(loadAppLogo())
+                        .setTitle(title)
+                        .setMessage(message)
+                        .setCancelable(false)
+                        .setPositiveButton(
+                                confirmText,
+                                (dialog, which) -> openAppInfoForPermissions())
+                        .setNegativeButton(
+                                cancelText,
+                                (dialog, which) -> finishPermissionFlow())
+                        .show();
+            } catch (Exception ex) {
+                Log.w(TAG, "Unable to show the permission dialog", ex);
+                finishPermissionFlow();
+            }
+        });
+    }
+
+    /**
+     * The single redirect: this app's App info page. It is ONE stable intent
+     * ({@link Settings#ACTION_APPLICATION_DETAILS_SETTINGS} + package uri)
+     * that works on every Android version - Android 6+ lists "Display over
+     * other apps" and Android 8+ also lists "Install unknown apps", so the
+     * user enables BOTH toggles in one place and returns once. (Below
+     * Android 8 the install permission needs no entry here at all - the
+     * system installer shows its own "Unknown sources" dialog at install
+     * time, see {@link #canRequestInstalls()}.)
+     */
+    private void openAppInfoForPermissions() {
+        try {
+            Intent intent = new Intent(
+                    Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                    Uri.parse("package:" + getContext().getPackageName()));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            awaitingPermissionSettings = true;
+            startActivitySafely(intent);
+        } catch (Exception ex) {
+            Log.w(TAG, "Unable to open the App info page", ex);
+            awaitingPermissionSettings = false;
+            finishPermissionFlow();
+        }
+    }
+
+    /** Resolves the pending JS call with the final permission status. */
+    private void finishPermissionFlow() {
+        awaitingPermissionSettings = false;
+        PluginCall call = permissionCall;
+        permissionCall = null;
+        if (call == null) return;
+        boolean canInstall = canRequestInstalls();
+        boolean canOverlay = canDrawOverlaysNow();
+        JSObject result = new JSObject();
+        result.put("canInstall", canInstall);
+        result.put("canDrawOverlays", canOverlay);
+        result.put("ready", canInstall && canOverlay);
+        call.resolve(result);
+    }
+
+    /** The host app's own logo - what makes the dialog look native everywhere. */
+    private Drawable loadAppLogo() {
+        try {
+            Context context = getContext();
+            Drawable logo = context.getApplicationInfo().loadLogo(context.getPackageManager());
+            if (logo != null) return logo;
+            return context.getApplicationInfo().loadIcon(context.getPackageManager());
+        } catch (Exception ex) {
+            return getContext().getPackageManager().getDefaultActivityIcon();
+        }
+    }
+
+    private static String firstNonEmpty(String value, String fallback) {
+        return value == null || value.trim().isEmpty() ? fallback : value;
+    }
+
+    /**
+     * One-shot readiness check for the pre-update gate:
+     * {@code { canInstall, canDrawOverlays, ready }} - see
+     * {@link #requestUpdatePermissions} for the prompting flow.
+     */
+    @PluginMethod
+    public void getPermissionStatus(PluginCall call) {
+        JSObject result = new JSObject();
+        boolean canInstall = canRequestInstalls();
+        boolean canOverlay = canDrawOverlaysNow();
+        result.put("canInstall", canInstall);
+        result.put("canDrawOverlays", canOverlay);
+        result.put("ready", canInstall && canOverlay);
+        call.resolve(result);
+    }
+
+    private boolean canDrawOverlaysNow() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                return Settings.canDrawOverlays(getContext());
+            }
+            return true;
+        } catch (Exception ex) {
+            return true;
+        }
+    }
+
     private boolean canRequestInstalls() {
         Context context = getContext();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             return context.getPackageManager().canRequestPackageInstalls();
         }
-        // Below Android 8.0 the global "Unknown sources" setting applies.
-        try {
-            int installNonMarketApps = Settings.Secure.getInt(
-                    context.getContentResolver(),
-                    Settings.Secure.INSTALL_NON_MARKET_APPS, 1);
-            return installNonMarketApps == 1;
-        } catch (Exception ex) {
-            return true;
-        }
+        // Below Android 8 there is NO per-app "Install unknown apps" entry on
+        // the App info page (Android 8+ adds it), so a strict check could
+        // never be satisfied from the single redirect we show and the update
+        // gate would block forever. The global "Unknown sources" toggle lives
+        // in Settings > Security there, and the system installer shows its
+        // own dialog for it at install time anyway - so from the app's
+        // perspective the permission needs no Settings trip below Android 8.
+        return true;
     }
 
     // ---------------------------------------------------------------------

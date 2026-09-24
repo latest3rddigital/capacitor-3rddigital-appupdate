@@ -1218,11 +1218,37 @@ function isUnsignedApkPath(p) {
 }
 
 /**
- * Finds APKs under android/app/build/outputs/apk.
+ * Directories that never contain a distributable APK but would make the
+ * project-wide scan slow or noisy. `intermediates` / `tmp` / `generated`
+ * duplicate (or mock) the real AGP outputs under build/outputs.
+ */
+const APK_SCAN_SKIP_DIRS = new Set([
+  "node_modules",
+  ".git",
+  ".hg",
+  ".svn",
+  ".idea",
+  ".vscode",
+  ".gradle",
+  ".capacitor",
+  ".turbo",
+  ".cache",
+  "coverage",
+  "intermediates",
+  "tmp",
+  "generated",
+]);
+
+/**
+ * Finds every .apk in the project (NOT just android/app/build/outputs/apk):
+ * release APKs are often moved to project-specific folders such as
+ * android/app/<flavor>/release/, android/app/release/ or release/ - those
+ * must stay visible/selectable too.
  * - build mode: only APKs from this run (startTime) + prefer the release
  *   output of the selected variant (release preferred, debug still visible).
  * - upload mode: lists EVERYTHING (release + debug + all flavors) so any
- *   previously built APK can be picked. Debug APKs are labelled + gated.
+ *   previously built APK can be picked. Debug APKs are labelled + gated and a
+ *   warning is printed when no release APK exists at all.
  */
 function findBuiltApk({
   variantName,
@@ -1231,17 +1257,20 @@ function findBuiltApk({
   uploadMode,
   flavorFilter,
 }) {
-  const outputsRoot = path.join(
-    projectRoot,
-    "android",
-    "app",
-    "build",
-    "outputs",
-    "apk",
-  );
-  if (!fs.existsSync(outputsRoot)) {
-    console.warn(`⚠️ APK outputs directory not found: ${outputsRoot}`);
-    return [];
+  // Scan the whole project (skip dirs above) so release APKs outside the
+  // standard AGP output are found, plus an optional explicit override that
+  // may live outside the project.
+  const rootsToScan = [projectRoot];
+  if (process.env.APPUPDATE_APK_DIR) {
+    try {
+      const override = path.resolve(
+        projectRoot,
+        process.env.APPUPDATE_APK_DIR.trim(),
+      );
+      if (!rootsToScan.includes(override)) rootsToScan.push(override);
+    } catch {
+      /* ignore bad override */
+    }
   }
 
   const isFlavored = !!variantName && variantName.toLowerCase() !== "default";
@@ -1250,6 +1279,7 @@ function findBuiltApk({
   const uploadFlavorDir =
     uploadMode && flavorFilter ? flavorFilter.toLowerCase() : null;
   const candidates = [];
+  const seenApkPaths = new Set();
 
   function scoreApk(fullPath) {
     const normalized = fullPath.toLowerCase().replace(/\\/g, "/");
@@ -1275,7 +1305,9 @@ function findBuiltApk({
   }
 
   function collect(dir, depth) {
-    if (depth > 5) return;
+    // Project-wide scan: deep enough for android/app/<flavor>/release/** but
+    // bounded so a symlink cycle can never run away.
+    if (depth > 12) return;
     let entries;
     try {
       entries = fs.readdirSync(dir);
@@ -1291,17 +1323,19 @@ function findBuiltApk({
         continue;
       }
       if (stat.isDirectory()) {
+        if (APK_SCAN_SKIP_DIRS.has(entry.toLowerCase())) continue;
         collect(fullPath, depth + 1);
       } else if (entry.toLowerCase().endsWith(".apk")) {
-        // Build mode: ignore stale builds from before this run started.
-        // Upload mode: list everything (no startTime passed).
-        if (startTime && stat.mtime.getTime() < startTime - 1000) continue;
+        const real = path.resolve(fullPath);
+        if (seenApkPaths.has(real)) continue;
+        seenApkPaths.add(real);
         const full = fullPath.toLowerCase().replace(/\\/g, "/");
         // `--flavor <name>` in upload mode narrows the picker to that flavor.
         if (uploadFlavorDir && !full.includes(`/${uploadFlavorDir}/`)) continue;
         candidates.push({
           path: fullPath,
           mtime: stat.mtime.getTime(),
+          size: stat.size,
           score: scoreApk(fullPath),
           isDebug: isDebugApkPath(full),
           isUnsigned: isUnsignedApkPath(full),
@@ -1310,9 +1344,53 @@ function findBuiltApk({
     }
   }
 
-  collect(outputsRoot, 0);
+  const existingRoots = rootsToScan.filter((r) => {
+    try {
+      return fs.existsSync(r);
+    } catch {
+      return false;
+    }
+  });
+  for (const root of existingRoots) collect(root, 0);
+  if (!candidates.length) {
+    console.warn(
+      "⚠️ No .apk files found in this project (scanned: " +
+        existingRoots.map((r) => path.relative(projectRoot, r) || ".").join(", ") +
+        ").\n   Built a release APK elsewhere? Re-run with --apk <path> or set APPUPDATE_APK_DIR=<dir>.",
+    );
+    return [];
+  }
+  if (uploadMode && candidates.every((c) => c.isDebug)) {
+    console.warn(
+      `⚠️ Found ${candidates.length} APK(s), but ALL of them are debug builds - ` +
+        "no release APK exists in this project yet.\n" +
+        "   Build one with `npx appupdate-apk` (builds + uploads a release APK), " +
+        "or point at an existing one with --apk <path> / APPUPDATE_APK_DIR=<dir>.",
+    );
+  }
 
-  const sorted = candidates.sort(
+  const sortedAll = [...candidates].sort(
+    (a, b) => b.score - a.score || b.mtime - a.mtime,
+  );
+
+  // Build mode: prefer APKs produced by this run. Gradle reports UP-TO-DATE
+  // without touching the APK when nothing changed, so a strict fresh-only
+  // filter hides an already-built release APK (the reported bug). Fall back
+  // to the newest existing outputs for the same variant instead.
+  let pool = sortedAll;
+  if (!uploadMode && startTime) {
+    const fresh = sortedAll.filter((c) => c.mtime >= startTime - 5000);
+    if (fresh.length) {
+      pool = fresh;
+    } else {
+      console.warn(
+        "⚠️ No fresh APK from this Gradle run (outputs may be UP-TO-DATE). " +
+          "Falling back to the newest existing APK outputs.",
+      );
+    }
+  }
+
+  const sorted = [...pool].sort(
     (a, b) => b.score - a.score || b.mtime - a.mtime,
   );
 
@@ -1338,7 +1416,7 @@ function findBuiltApk({
     }
     return sorted.map((c) => c.path);
   }
-  return sorted;
+  return sortedAll;
 }
 
 /**
@@ -1347,10 +1425,26 @@ function findBuiltApk({
  * APK. Since AGP has no version-injection support, this is the only reliable
  * way to know what was just built - and it is what we register on the server so
  * the app's update check can never loop on a version that does not exist.
+ *
+ * The file sits next to the APK for standard outputs; for manually moved APKs
+ * (e.g. android/app/<flavor>/release/) we walk UP the variant tree so the
+ * version can still be verified.
  */
+function findOutputMetadataForApk(apkPath) {
+  let dir = path.dirname(apkPath);
+  for (let i = 0; i < 5; i += 1) {
+    const candidate = path.join(dir, "output-metadata.json");
+    if (fs.existsSync(candidate)) return candidate;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
 function readApkOutputMetadata(apkPath) {
-  const metadataPath = path.join(path.dirname(apkPath), "output-metadata.json");
-  if (!fs.existsSync(metadataPath)) return null;
+  const metadataPath = findOutputMetadataForApk(apkPath);
+  if (!metadataPath) return null;
 
   try {
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
@@ -1938,7 +2032,17 @@ async function main() {
   );
 }
 
-main().catch((err) => {
-  console.error(`❌ ${err?.message ?? err}`);
-  process.exit(1);
-});
+// Run only when invoked as the CLI (`npx appupdate-apk`); requiring this file
+// (e.g. from tests) exposes the helpers instead.
+if (require.main === module) {
+  main().catch((err) => {
+    console.error(`❌ ${err?.message ?? err}`);
+    process.exit(1);
+  });
+}
+
+module.exports = {
+  findBuiltApk,
+  readApkOutputMetadata,
+  getProjectRoot,
+};

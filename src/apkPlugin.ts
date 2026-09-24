@@ -8,6 +8,8 @@ import type {
   ApkInstallResult,
   ApkInstallStateInfo,
   ApkNotificationPermissionResult,
+  ApkPermissionPromptOptions,
+  ApkPermissionStatus,
   ApkUpdateProgress,
 } from "./apkTypes.js";
 
@@ -32,12 +34,37 @@ export interface ApkUpdaterPluginInterface {
   getAppInfo(): Promise<ApkAppInfo>;
 
   /**
+   * One-shot readiness check for the pre-update gate:
+   * `{ canInstall, canDrawOverlays, ready }`. Neither permission can be
+   * granted programmatically - both need a user toggle in Settings - so the
+   * JS layer runs the NATIVE dialog flow below and only offers the APK
+   * update popup once `ready` is true (install permission required, overlay
+   * best-effort for auto-reopen; the update itself works without overlay via
+   * the tap-to-open notification fallback).
+   */
+  getPermissionStatus(): Promise<ApkPermissionStatus>;
+
+  /**
+   * NATIVE permission prompt: ONE Android dialog that lists BOTH special
+   * permissions together ("Install unknown apps" + "Display over other
+   * apps"), built from the host app's own theme and logo so it looks like a
+   * system permission popup in every project - no per-project UI needed.
+   * Continue opens the app's **App info page**, where both toggles live
+   * (Android 8+ lists "Install unknown apps", Android 6+ lists "Display over
+   * other apps"), so the user enables both in ONE place and returns once.
+   * Resolves with the final `{ canInstall, canDrawOverlays, ready }`.
+   */
+  requestUpdatePermissions(
+    options?: ApkPermissionPromptOptions,
+  ): Promise<ApkPermissionStatus>;
+
+  /**
    * Whether the app may install APKs ("install unknown apps" permission).
    * Android never grants this silently - the user must flip it in Settings.
    */
   canInstall(): Promise<ApkCanInstallResult>;
 
-  /** Opens the OS settings so the user can grant the install permission. */
+  /** Opens the "Install unknown apps" Settings page for this app. */
   openInstallPermissionSettings(): Promise<void>;
 
   /**

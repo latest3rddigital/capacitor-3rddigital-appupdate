@@ -80,6 +80,27 @@ export interface ApkAppInfo {
   debuggable?: boolean;
 }
 
+export interface ApkPermissionStatus {
+  canInstall: boolean;
+  canDrawOverlays: boolean;
+  /** True only when BOTH special permissions are granted. */
+  ready: boolean;
+}
+
+/**
+ * Optional copy overrides for the NATIVE permission prompt: ONE dialog that
+ * describes BOTH special permissions together and whose Continue button
+ * opens the app's App info page (both toggles live there), drawn by Android
+ * with the host app's theme and logo - so by default no per-project UI work
+ * is needed at all.
+ */
+export interface ApkPermissionPromptOptions {
+  title?: string;
+  message?: string;
+  confirmText?: string;
+  cancelText?: string;
+}
+
 export interface ApkCanInstallResult {
   canInstall: boolean;
 }

@@ -2,15 +2,21 @@
 
     <!-- Required to download the APK from S3 -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Required to install an APK outside of a store (install unknown apps, Android 8+).
-         Special-access permission: CANNOT be auto-granted, but the user does NOT
-         need a Settings trip in the default flow - the system installer shows its
-         own inline "Allow from this source" prompt and resumes the install itself.
-         Only needed when `preflightInstallPermission: true` is used. -->
+    <!-- Required to install an APK outside of a store (install unknown apps).
+         Special-access permission: only the user can grant it in Settings.
+         On first launch the app must ask for it up-front (see
+         useApkUpdater.ensureApkPermissions) - the update popup only appears
+         once it is granted. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
     <!-- Allows a silent self-update (no confirmation dialog) on Android 12+.
          Install-time permission, auto-granted: NO user toggle, NO Settings trip. -->
     <uses-permission android:name="android.permission.UPDATE_PACKAGES_WITHOUT_USER_ACTION" />
+    <!-- Best-effort auto-reopen after the OS kills the app for the install.
+         Special-access permission: only the user can grant it in Settings.
+         The update works WITHOUT it (tap-to-open notification fallback); it
+         is only requested up-front in the same pre-update prompt so the app
+         can reopen itself automatically when allowed. -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
     <!-- Fallback notification ("Update installed - tap to open") on Android 13+.
          Runtime permission: granted via a standard in-app system dialog
          (see ApkUpdater.requestNotificationPermission()), NOT via Settings.
