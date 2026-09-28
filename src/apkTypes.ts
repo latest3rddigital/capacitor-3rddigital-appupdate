@@ -20,6 +20,9 @@ export interface ApkUpdateInfo {
   isDebugApk?: boolean;
 }
 
+/** Gate state for running forced OTA updates after forced APK updates. */
+export type ApkUpdatePriority = "checking" | "blocked" | "clear";
+
 /**
  * Unified phase of the whole update lifecycle (permission → download →
  * install → confirm → done), used to drive progress UIs.

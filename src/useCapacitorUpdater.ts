@@ -3,6 +3,7 @@ import { Capacitor, CapacitorHttp } from "@capacitor/core";
 import { Device } from "@capacitor/device";
 import { CapacitorUpdater } from "@capgo/capacitor-updater";
 import { useEffect, useState } from "react";
+import type { ApkUpdatePriority } from "./apkTypes.js";
 import type { UpdateInfo } from "./types.js";
 
 export function useCapacitorUpdater(options?: {
@@ -13,6 +14,8 @@ export function useCapacitorUpdater(options?: {
   apiKey?: string;
   showProgress?: boolean;
   onProgress?: (percent: number) => void;
+  /** Defer OTA checks while a forced APK update is checking or installing. */
+  apkUpdatePriority?: ApkUpdatePriority;
 }) {
   const APPUPDATE_BASE_URL = options?.baseUrl;
   const [isUpdateModalVisible, setUpdateModalVisible] = useState(false);
@@ -28,6 +31,12 @@ export function useCapacitorUpdater(options?: {
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return;
+    if (
+      options?.apkUpdatePriority === "checking" ||
+      options?.apkUpdatePriority === "blocked"
+    ) {
+      return;
+    }
 
     let downloadListener: any;
 
@@ -109,6 +118,7 @@ export function useCapacitorUpdater(options?: {
     options?.projectKey,
     options?.iosPackage,
     options?.androidPackage,
+    options?.apkUpdatePriority,
   ]);
 
   const handleUpdate = async (info = updateInfo) => {

@@ -10,6 +10,7 @@ import type {
   ApkProgressInfo,
   ApkUpdateInfo,
   ApkUpdatePhase,
+  ApkUpdatePriority,
 } from "./apkTypes.js";
 
 /**
@@ -195,6 +196,11 @@ export function useApkUpdater(options?: {
 }) {
   const [apkUpdateInfo, setApkUpdateInfo] = useState<ApkUpdateInfo | null>(
     null,
+  );
+  const [apkUpdatePriority, setApkUpdatePriority] = useState<ApkUpdatePriority>(
+    Capacitor.isNativePlatform() && Capacitor.getPlatform() === "android"
+      ? "checking"
+      : "clear",
   );
   const [isApkUpdateModalVisible, setApkUpdateModalVisible] = useState(false);
   const [apkProgress, setApkProgress] = useState<number>(0);
@@ -461,32 +467,36 @@ export function useApkUpdater(options?: {
     }
   };
 
-  const readPermissionStatus = async (): Promise<ApkPermissionStatus | null> => {
-    if (!Capacitor.isNativePlatform() || Capacitor.getPlatform() !== "android")
-      return null;
-    try {
-      const status = await ApkUpdater.getPermissionStatus();
-      const ready = status.canInstall && status.canDrawOverlays;
-      const full: ApkPermissionStatus = { ...status, ready };
-      setApkPermissionStatus(full);
-      setCanInstall(status.canInstall);
-      return full;
-    } catch {
+  const readPermissionStatus =
+    async (): Promise<ApkPermissionStatus | null> => {
+      if (
+        !Capacitor.isNativePlatform() ||
+        Capacitor.getPlatform() !== "android"
+      )
+        return null;
       try {
-        const legacy = await ApkUpdater.canInstall();
-        const full: ApkPermissionStatus = {
-          canInstall: legacy.canInstall,
-          canDrawOverlays: true,
-          ready: legacy.canInstall,
-        };
+        const status = await ApkUpdater.getPermissionStatus();
+        const ready = status.canInstall && status.canDrawOverlays;
+        const full: ApkPermissionStatus = { ...status, ready };
         setApkPermissionStatus(full);
-        setCanInstall(legacy.canInstall);
+        setCanInstall(status.canInstall);
         return full;
       } catch {
-        return null;
+        try {
+          const legacy = await ApkUpdater.canInstall();
+          const full: ApkPermissionStatus = {
+            canInstall: legacy.canInstall,
+            canDrawOverlays: true,
+            ready: legacy.canInstall,
+          };
+          setApkPermissionStatus(full);
+          setCanInstall(legacy.canInstall);
+          return full;
+        } catch {
+          return null;
+        }
       }
-    }
-  };
+    };
 
   /**
    * Permission-first gate. Call it on app open (before showing any update
@@ -552,7 +562,10 @@ export function useApkUpdater(options?: {
     // Declined for now: keep a parked update persisted so the next launch
     // resumes it as soon as the permissions are granted.
     awaitingPermissionRef.current = false;
-    if (!updateActiveRef.current && progressRef.current.phase === "permission") {
+    if (
+      !updateActiveRef.current &&
+      progressRef.current.phase === "permission"
+    ) {
       emitProgress({ phase: "idle", stagingPercent: -1 });
     }
     return false;
@@ -592,7 +605,9 @@ export function useApkUpdater(options?: {
         await ensureApkPermissions();
         return;
       }
-    } catch { /* permission check unavailable - try the update anyway */ }
+    } catch {
+      /* permission check unavailable - try the update anyway */
+    }
 
     updateInfoRef.current = info;
     reportedRef.current = { success: false, failure: false };
@@ -649,7 +664,6 @@ export function useApkUpdater(options?: {
   };
 
   useEffect(() => {
-
     let listeners: PluginListenerHandle[] = [];
     let cancelled = false;
 
@@ -680,6 +694,7 @@ export function useApkUpdater(options?: {
             }
             if (state.state === "success") {
               fireSuccess(consumeStoredAttempt(null));
+              setApkUpdatePriority("clear");
               return;
             }
             if (state.state === "failure") {
@@ -759,6 +774,7 @@ export function useApkUpdater(options?: {
           if (pendingInfo) {
             updateInfoRef.current = pendingInfo;
             setApkUpdateInfo(pendingInfo);
+            setApkUpdatePriority(pendingInfo.forceUpdate ? "blocked" : "clear");
             const current = gate ?? (await readPermissionStatus());
             if (current && current.ready) {
               clearPendingInfo();
@@ -807,8 +823,12 @@ export function useApkUpdater(options?: {
         const availableVersionCode = Number(data.versionCode ?? 0);
         const url = data.url as string | undefined;
 
-        if (!url || !availableVersionCode) return;
+        if (!url || !availableVersionCode) {
+          setApkUpdatePriority("clear");
+          return;
+        }
         if (availableVersionCode <= appInfo.versionCode) {
+          setApkUpdatePriority("clear");
           // Already up to date - drop any stale attempt marker.
           if (!updateActiveRef.current) {
             try {
@@ -839,6 +859,7 @@ export function useApkUpdater(options?: {
           isDebugApkUpdate(info) &&
           appInfo.debuggable === false
         ) {
+          setApkUpdatePriority("clear");
           const reason =
             "Blocked: server offered a debug APK to a release install - refusing to download/install.";
           console.warn(`[ApkUpdater] ${reason}`, info);
@@ -853,6 +874,7 @@ export function useApkUpdater(options?: {
         if (cancelled || updateActiveRef.current) return;
         updateInfoRef.current = info;
         setApkUpdateInfo(info);
+        setApkUpdatePriority(info.forceUpdate ? "blocked" : "clear");
         // Permission-first: only show the update popup when both toggles are
         // granted; otherwise run the NATIVE permission flow (the shared
         // system-style dialog) and keep the update parked until granted.
@@ -876,6 +898,7 @@ export function useApkUpdater(options?: {
           setApkUpdateModalVisible(true);
         }
       } catch (err) {
+        setApkUpdatePriority("clear");
         console.warn("[ApkUpdater] Failed to fetch update:", err);
       }
     })();
@@ -960,6 +983,8 @@ export function useApkUpdater(options?: {
 
   return {
     apkUpdateInfo,
+    /** Gate OTA updates until APK checking/forced APK installation is done. */
+    apkUpdatePriority,
     isApkUpdateModalVisible,
     setApkUpdateModalVisible,
     handleApkUpdate,
