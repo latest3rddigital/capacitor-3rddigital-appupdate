@@ -335,10 +335,14 @@ public class ApkUpdaterPlugin extends Plugin {
      *
      * <p>Permissions that are already granted (some Android versions grant one
      * of the two by default) are skipped without any UI, so typically only ONE
-     * popup is shown. Resolves once with the final
+     * popup is shown. The flow runs on EVERY open until each requested
+     * permission is granted - declining or killing the app does not dismiss it
+     * for good. Resolves once with the final
      * {@code { canInstall, canDrawOverlays, ready, canUpdate }} status.
      * Declining ("Not now", or coming back from Settings without granting)
-     * resolves with the current state - it never rejects.</p>
+     * resolves with the current state - it never rejects. Overlapping calls
+     * (another prompt already running) also resolve immediately with the
+     * current status - the running flow owns the dialogs.</p>
      *
      * <p>Options: {@code showNativeDialog} (default true) - false draws no
      * dialog at all and resolves immediately, so a project can render its own
@@ -384,7 +388,12 @@ public class ApkUpdaterPlugin extends Plugin {
      */
     private void startPermissionFlow(PluginCall call, String singleKind) {
         if (permissionCall != null) {
-            call.reject("A permission request is already in progress");
+            // Another prompt is already running (e.g. a project's own
+            // app-open call racing the hook's). Report the CURRENT status
+            // instead of rejecting: the running flow owns the dialogs and
+            // this caller only needs the state. Keeps the documented
+            // "never rejects" contract and makes overlapping calls benign.
+            call.resolve(buildPermissionStatus());
             return;
         }
         permissionCall = call;

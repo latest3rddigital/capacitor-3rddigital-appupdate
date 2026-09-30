@@ -121,8 +121,12 @@ How it behaves:
     prompted**, i.e. a single popup.
   - Each permission is prompted **at most once per flow**: coming back from
     Settings _with_ the grant moves on to the next missing permission; coming
-    back _without_ it resolves the flow (no nagging — the prompt runs again on
-    the next launch).
+    back _without_ it resolves the flow (no nagging within one flow).
+  - The cycle repeats on **every app open until each permission is granted** —
+    pressing "Not now" or killing the app never dismisses it for good. A
+    relaunch that finds "Install unknown apps" already granted (but not the
+    overlay) still pops the missing one; this best-effort prompt never blocks
+    the update flow itself.
   - The APK update popup only appears once the gate passes — first launch
     therefore shows the native permission popup, never the update popup
     straight after install.
@@ -832,7 +836,7 @@ Headers: `Api-Key: <APPUPDATE_API_KEY>`
   silently (so where one of the two is granted by default only the missing
   one is prompted), each permission is prompted at most once per flow
   (returning from Settings with the grant moves to the next missing one;
-  returning without resolves the flow — no nagging), and the final result is
+  returning without resolves the flow — no nagging). The cycle then repeats on **every app open until each permission is granted** — declining ("Not now") or killing the app never dismisses it for good, and a relaunch that already passes the gate still prompts for a missing best-effort permission (that prompt never blocks the update flow). The final result is
   `{ canInstall, canDrawOverlays, ready, canUpdate }`. The APK update popup
   only appears once the gate passes (`canUpdate` by default), so first
   launch shows the native popup — never the update popup straight after

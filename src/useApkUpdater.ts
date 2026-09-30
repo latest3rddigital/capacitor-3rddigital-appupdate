@@ -147,6 +147,10 @@ function clearPendingInfo() {
  *    hides it on recent Android releases. Whichever permission the device
  *    already grants (some versions grant one of the two by default) is
  *    skipped, so typically only ONE popup appears.
+ *    The cycle repeats on EVERY app open until each permission is granted -
+ *    declining ("Not now") or killing the app never dismisses it for good,
+ *    and a relaunch that already passes the gate still pops whatever is
+ *    missing (without blocking the update flow).
  *    The update popup (`isApkUpdateModalVisible`) only appears once the
  *    permission gate passes, so the user never sees "update available"
  *    before the app is actually able to install it.
@@ -667,7 +671,10 @@ export function useApkUpdater(options?: {
    * project and need no custom UI here), each Continue opening the exact
    * Settings page of that permission. Permissions the device already grants
    * (some versions grant one of the two by default) are skipped, so typically
-   * only ONE popup appears.
+   * only ONE popup appears. The flow keeps running on EVERY open until each
+   * requested permission is granted - even when the update gate already
+   * passes on "Install unknown apps" alone, the still-missing best-effort
+   * permission keeps prompting (that prompt never blocks the update flow).
    *
    * Returns true only when the update may proceed. With
    * `nativePermissionPrompt: false` (or `showNativeDialog: false` here) no
@@ -682,25 +689,47 @@ export function useApkUpdater(options?: {
   }): Promise<boolean> => {
     const status = await readPermissionStatus();
     if (!status) return true;
-    if (permissionGatePassed(status)) {
-      // Already granted (e.g. a previous session parked the update and the
-      // user enabled the permission manually): run the shared bookkeeping so
+    // Permissions this flow is willing to prompt for (chain order): the call
+    // override wins, then the configured prompt set, default BOTH.
+    const requested: ApkPermissionKind[] =
+      override?.permissions ??
+      optionsRef.current?.permissionPromptOptions?.permissions ??
+      ["install", "overlay"];
+    const stillMissing =
+      (requested.includes("install") && !status.canInstall) ||
+      (requested.includes("overlay") && !status.canDrawOverlays);
+    const gatePassed = permissionGatePassed(status);
+    if (gatePassed && !stillMissing) {
+      // Everything granted (e.g. a previous session parked the update and the
+      // user enabled the permissions manually): run the shared bookkeeping so
       // a parked update continues and the wait flags are cleaned up.
       await onRequiredPermissionsGranted();
       return true;
     }
+    // `gatePassed && stillMissing` = the REQUIRED permission is in but a
+    // best-effort one ("Display over other apps") is not. Keep PROMPTING for
+    // it - the popup must reappear on EVERY open until granted, even after a
+    // relaunch that left the gate already passing - but the APK update itself
+    // is NOT blocked: no parking, no apkBlockedByPermission, no "permission"
+    // phase, no waiting flag (the native chain resolves itself).
+    const promptOnly = gatePassed;
+
     const info = updateInfoRef.current;
-    if (info) {
+    if (info && !promptOnly) {
       pendingInfoRef.current = info;
       persistPendingInfo(info);
     }
     const showNativeDialog =
       override?.showNativeDialog ??
       optionsRef.current?.nativePermissionPrompt !== false;
-    setApkBlockedByPermission(true);
+    if (!promptOnly) {
+      setApkBlockedByPermission(true);
+    }
     if (showNativeDialog) {
-      awaitingPermissionRef.current = true;
-      emitProgress({ phase: "permission" });
+      if (!promptOnly) {
+        awaitingPermissionRef.current = true;
+        emitProgress({ phase: "permission" });
+      }
       try {
         // Native flow: one popup per missing permission, each opening its own
         // Settings page; resolves when the user is back (granted or not).
@@ -967,6 +996,30 @@ export function useApkUpdater(options?: {
         // never the update popup straight after install.
         const gate = await readPermissionStatus();
         if (cancelled) return;
+
+        // Keep asking for whatever the device is still missing on EVERY open
+        // - including when the gate ALREADY passes on "Install unknown apps"
+        // alone ("Display over other apps" is best-effort). That was exactly
+        // where the popup used to stop re-appearing: after a relaunch the
+        // required permission was in, so nothing triggered the missing
+        // overlay popup anymore. Fire-and-forget so this best-effort prompt
+        // can never delay the update flow; with nativePermissionPrompt
+        // disabled it only re-checks (no dialog is drawn).
+        if (gate && permissionGatePassed(gate)) {
+          const requested: ApkPermissionKind[] =
+            optionsRef.current?.permissionPromptOptions?.permissions ?? [
+              "install",
+              "overlay",
+            ];
+          const stillMissing =
+            (requested.includes("install") && !gate.canInstall) ||
+            (requested.includes("overlay") && !gate.canDrawOverlays);
+          if (stillMissing) {
+            ensureApkPermissions().catch(() => {
+              // Best-effort prompt - never affects the update flow.
+            });
+          }
+        }
 
         // 1) A previous attempt may have completed while this process was
         //    killed by the install - verify and surface the success exactly
