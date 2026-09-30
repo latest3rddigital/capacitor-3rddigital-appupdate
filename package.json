@@ -1,6 +1,6 @@
 {
   "name": "capacitor-3rddigital-appupdate",
-  "version": "2.0.3",
+  "version": "2.0.4",
   "description": "Auto OTA update handler for Capacitor + React apps",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
