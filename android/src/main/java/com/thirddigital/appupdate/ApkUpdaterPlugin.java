@@ -38,9 +38,14 @@ import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.ArrayDeque;
+import java.util.Deque;
+import java.util.Locale;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicBoolean;
+
+import org.json.JSONArray;
 
 /**
  * Native Android plugin for the in-app APK update flow.
@@ -110,16 +115,16 @@ public class ApkUpdaterPlugin extends Plugin {
     }
 
     /**
-     * Continues the native permission dialog flow after the user comes back
-     * from the App info page.
+     * Continues the native permission flow after the user comes back from the
+     * permission's Settings page (one trip per missing permission).
      */
     @Override
     protected void handleOnResume() {
         super.handleOnResume();
         if (!awaitingPermissionSettings) return;
         awaitingPermissionSettings = false;
-        // Give the Settings toggles a beat to commit, then re-check BOTH
-        // permissions and resolve the flow.
+        // Give the Settings toggle a beat to commit, then re-check that
+        // permission and continue with the next missing one (if any).
         mainHandler.postDelayed(() -> continuePermissionFlow(true), 250);
     }
 
@@ -260,102 +265,226 @@ public class ApkUpdaterPlugin extends Plugin {
 
     @PluginMethod
     public void openInstallPermissionSettings(PluginCall call) {
-        Context context = getContext();
-        try {
-            Intent intent;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                intent = new Intent(
-                        Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                        Uri.parse("package:" + context.getPackageName()));
-            } else {
-                intent = new Intent(
-                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
-                        Uri.parse("package:" + context.getPackageName()));
-            }
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            startActivitySafely(intent);
+        openSinglePermissionSettings(call, PERMISSION_KIND_INSTALL);
+    }
+
+    /**
+     * Opens the "Display over other apps" Settings page of this app
+     * ({@code ACTION_MANAGE_OVERLAY_PERMISSION} + package, Android 6+) - the
+     * JS-side counterpart of the native overlay popup, for projects that render
+     * their own permission UI.
+     */
+    @PluginMethod
+    public void openOverlayPermissionSettings(PluginCall call) {
+        openSinglePermissionSettings(call, PERMISSION_KIND_OVERLAY);
+    }
+
+    /**
+     * Opens a permission's Settings page directly (no dialog). Used by the
+     * JS-side custom-UI flow; the generic App info page is only the fallback.
+     */
+    private void openSinglePermissionSettings(PluginCall call, String kind) {
+        if (openPermissionSettingsPage(kind) || openAppInfoSettings()) {
             call.resolve();
-        } catch (Exception ex) {
-            call.reject("Unable to open install permission settings", ex);
+            return;
         }
+        call.reject("Unable to open the " + kind + " permission settings");
     }
 
     // -------------------------------------------------------------------------
-    // Permission prompt - ONE native dialog (host app theme + logo) covering
-    // BOTH special permissions, so consuming projects never need custom UI.
+    // Permissions
+    //
+    // Two special-access permissions gate the APK update:
+    //   1. "Install unknown apps"    (REQUEST_INSTALL_PACKAGES) - REQUIRED
+    //   2. "Display over other apps" (SYSTEM_ALERT_WINDOW)      - best effort
+    //
+    // Neither can be granted programmatically, so the plugin ships its own
+    // NATIVE popup PER permission (host app theme + app logo = it looks like a
+    // system permission popup in every project, no per-project UI needed).
+    // Continue opens the EXACT Settings page of that permission
+    // (ACTION_MANAGE_UNKNOWN_APP_SOURCES / ACTION_MANAGE_OVERLAY_PERMISSION),
+    // never the generic App info page - recent Android releases hide the
+    // "Install unknown apps" toggle there, so the user would have to hunt for
+    // it. Whichever permission the device already grants (some versions grant
+    // one of the two by default) is skipped without any UI, so only the missing
+    // permission is prompted.
     // -------------------------------------------------------------------------
+
+    /** Permission kind ids shared with the JS layer. */
+    private static final String PERMISSION_KIND_INSTALL = "install";
+    private static final String PERMISSION_KIND_OVERLAY = "overlay";
 
     /** Pending JS call while the native permission flow is running (main thread). */
     private PluginCall permissionCall;
-    /** True while the flow waits for the user to come back from App info. */
+    /** True while the flow waits for the user to come back from Settings. */
     private volatile boolean awaitingPermissionSettings;
+    /** Permission kinds still to handle, in order (first entry = current step). */
+    private final Deque<String> pendingPermissionKinds = new ArrayDeque<>();
+    /** False when the JS layer renders its own permission UI (no native dialog). */
+    private boolean permissionShowNativeDialog = true;
 
     /**
-     * ONE native dialog for BOTH special permissions ("Install unknown apps"
-     * - required for the update itself - and "Display over other apps" - the
-     * auto-reopen helper). The dialog is a plain Android AlertDialog (app
-     * logo + host app theme, so it looks like a system permission popup in
-     * every project) that lists BOTH messages together; Continue opens the
-     * app's <b>App info page</b> where BOTH toggles live (Android 8+ lists
-     * "Install unknown apps", Android 6+ lists "Display over other apps"), so
-     * the user allows everything in one place and comes back once -
-     * {@link #handleOnResume()} re-checks both toggles and resolves.
+     * NATIVE permission prompt for BOTH special permissions, shown as TWO
+     * separate popups (one per missing permission, in order): "Install unknown
+     * apps" first (required to install any update), then "Display over other
+     * apps" (best-effort auto-reopen helper). Each popup is a plain Android
+     * AlertDialog drawn with the host app's theme + the app's own logo, so it
+     * looks like a system permission popup in every project, and its Continue
+     * button opens the EXACT Settings page of that permission - the user never
+     * has to find the toggle in the Settings tree.
      *
-     * <p>Resolves with the final {@code { canInstall, canDrawOverlays, ready }}
-     * status. Declining ("Not now", or coming back from App info without
-     * granting) resolves with {@code ready: false} - it never rejects, and the
-     * prompt is simply shown again on the next launch while not ready.</p>
+     * <p>Permissions that are already granted (some Android versions grant one
+     * of the two by default) are skipped without any UI, so typically only ONE
+     * popup is shown. Resolves once with the final
+     * {@code { canInstall, canDrawOverlays, ready, canUpdate }} status.
+     * Declining ("Not now", or coming back from Settings without granting)
+     * resolves with the current state - it never rejects.</p>
      *
-     * <p>Optional copy overrides: {@code title}, {@code message},
-     * {@code confirmText}, {@code cancelText}.</p>
+     * <p>Options: {@code showNativeDialog} (default true) - false draws no
+     * dialog at all and resolves immediately, so a project can render its own
+     * JS popup and drive Settings through
+     * {@link #openInstallPermissionSettings} / {@link #openOverlayPermissionSettings};
+     * {@code permissions} - restrict the flow to a subset; per-permission copy
+     * overrides via the nested {@code install} / {@code overlay} objects; shared
+     * copy overrides {@code title}, {@code message}, {@code confirmText},
+     * {@code cancelText}.</p>
      */
     @PluginMethod
     public void requestUpdatePermissions(PluginCall call) {
+        startPermissionFlow(call, null);
+    }
+
+    /**
+     * NATIVE permission prompt for the "Install unknown apps" permission ONLY
+     * (required to install an update). Same dialog/Settings-page behaviour and
+     * options as {@link #requestUpdatePermissions}.
+     */
+    @PluginMethod
+    public void requestInstallPermission(PluginCall call) {
+        startPermissionFlow(call, PERMISSION_KIND_INSTALL);
+    }
+
+    /**
+     * NATIVE permission prompt for the "Display over other apps" permission
+     * ONLY (best-effort auto-reopen helper; the update works without it via the
+     * tap-to-open notification fallback). Same dialog/Settings-page behaviour
+     * and options as {@link #requestUpdatePermissions}.
+     */
+    @PluginMethod
+    public void requestOverlayPermission(PluginCall call) {
+        startPermissionFlow(call, PERMISSION_KIND_OVERLAY);
+    }
+
+    /**
+     * Shared entry point of every permission prompt: builds the queue of
+     * permission kinds to handle and starts the (main-thread) flow.
+     *
+     * @param singleKind {@code null} for the combined flow, else the single
+     *                   permission this call should handle
+     */
+    private void startPermissionFlow(PluginCall call, String singleKind) {
         if (permissionCall != null) {
             call.reject("A permission request is already in progress");
             return;
         }
         permissionCall = call;
+        permissionShowNativeDialog =
+                !Boolean.FALSE.equals(call.getBoolean("showNativeDialog", Boolean.TRUE));
+        pendingPermissionKinds.clear();
+        if (singleKind != null) {
+            pendingPermissionKinds.add(singleKind);
+        } else {
+            JSONArray requested = call.getArray("permissions");
+            if (requested != null && requested.length() > 0) {
+                for (int i = 0; i < requested.length(); i++) {
+                    String kind = normalizePermissionKind(requested.optString(i, null));
+                    if (kind != null && !pendingPermissionKinds.contains(kind)) {
+                        pendingPermissionKinds.add(kind);
+                    }
+                }
+            }
+            if (pendingPermissionKinds.isEmpty()) {
+                // Required permission first, best-effort helper second.
+                pendingPermissionKinds.add(PERMISSION_KIND_INSTALL);
+                pendingPermissionKinds.add(PERMISSION_KIND_OVERLAY);
+            }
+        }
         mainHandler.post(() -> continuePermissionFlow(false));
     }
 
-    /**
-     * Resolves when both toggles are granted; otherwise shows the single
-     * combined dialog. After the App info trip the flow always finishes:
-     * ONE trip is supposed to cover both toggles, re-showing immediately
-     * would nag - the prompt simply runs again on the next launch if still
-     * not ready.
-     *
-     * @param returnedFromSettings true when resuming after the App info trip
-     */
-    private void continuePermissionFlow(boolean returnedFromSettings) {
-        if (permissionCall == null) return;
-        boolean canInstall = canRequestInstalls();
-        boolean canOverlay = canDrawOverlaysNow();
-        if (canInstall && canOverlay) {
-            finishPermissionFlow();
-            return;
-        }
-        if (returnedFromSettings) {
-            finishPermissionFlow();
-            return;
-        }
-        showPermissionDialog(canInstall, canOverlay);
+    /** Maps a JS permission kind ("install" / "overlay") to its id, or null. */
+    private static String normalizePermissionKind(String kind) {
+        if (kind == null) return null;
+        String value = kind.trim().toLowerCase(Locale.US);
+        if (PERMISSION_KIND_INSTALL.equals(value)) return PERMISSION_KIND_INSTALL;
+        if (PERMISSION_KIND_OVERLAY.equals(value)) return PERMISSION_KIND_OVERLAY;
+        return null;
     }
 
     /**
-     * The ONE native dialog that describes BOTH permissions together:
-     * host-app theme, the app's own logo and optional copy overrides from
-     * the JS call. There is no per-project UI here - it renders like a
-     * native permission popup in every consuming app. Continue opens the
-     * App info page so the user enables both toggles in one place.
+     * Walks the pending permission queue. Every permission that is already
+     * granted - or not required on this Android version - is skipped without any
+     * UI, so when the device grants one of the two by default only the missing
+     * one is prompted.
      *
-     * @param installGranted current state of "Install unknown apps"
-     * @param overlayGranted current state of "Display over other apps"
+     * <p>When a permission is missing its own native dialog is shown; Continue
+     * opens that permission's Settings page and the flow resumes in
+     * {@link #handleOnResume()}. Each permission is prompted at most once per
+     * flow: coming back WITHOUT granting resolves the call (no nagging - the
+     * prompt runs again on the next launch), coming back WITH the grant moves on
+     * to the next missing permission.</p>
+     *
+     * @param returnedFromSettings true when resuming after a Settings trip
      */
-    private void showPermissionDialog(
-            final boolean installGranted,
-            final boolean overlayGranted) {
+    private void continuePermissionFlow(boolean returnedFromSettings) {
+        if (permissionCall == null) return;
+        if (returnedFromSettings) {
+            String handled = pendingPermissionKinds.peek();
+            if (handled != null && !isPermissionGranted(handled)) {
+                // Not granted on this trip: resolve with the current state
+                // instead of re-showing the same dialog.
+                finishPermissionFlow();
+                return;
+            }
+            pendingPermissionKinds.poll();
+        }
+        while (!pendingPermissionKinds.isEmpty()) {
+            String kind = pendingPermissionKinds.peek();
+            if (isPermissionGranted(kind)) {
+                pendingPermissionKinds.poll();
+                continue;
+            }
+            if (!permissionShowNativeDialog) {
+                // The JS layer renders its own popup and drives Settings itself
+                // (openInstallPermissionSettings / openOverlayPermissionSettings).
+                finishPermissionFlow();
+                return;
+            }
+            showPermissionDialog(kind);
+            return;
+        }
+        finishPermissionFlow();
+    }
+
+    /** True when the given permission is usable right now (or not needed here). */
+    private boolean isPermissionGranted(String kind) {
+        return PERMISSION_KIND_OVERLAY.equals(kind)
+                ? canDrawOverlaysNow()
+                : canRequestInstalls();
+    }
+
+    /**
+     * The native popup of ONE permission: host-app theme, the app's own logo and
+     * optional copy overrides - so it renders like a system permission popup in
+     * every consuming app, with no per-project UI. Continue opens the EXACT
+     * Settings page of that permission (see
+     * {@link #openPermissionSettings(String)}); "Not now" resolves the flow
+     * right away.
+     *
+     * @param kind {@link #PERMISSION_KIND_INSTALL} or
+     *             {@link #PERMISSION_KIND_OVERLAY}
+     */
+    private void showPermissionDialog(final String kind) {
         final PluginCall call = permissionCall;
         if (call == null) return;
         final Activity activity = getActivity();
@@ -365,24 +494,42 @@ public class ApkUpdaterPlugin extends Plugin {
             return;
         }
 
+        final boolean overlay = PERMISSION_KIND_OVERLAY.equals(kind);
         final Context context = getContext();
         final String appName = context
                 .getApplicationInfo()
                 .loadLabel(context.getPackageManager())
                 .toString();
-        final String title = firstNonEmpty(call.getString("title"), "Allow app updates");
+        // Per-permission copy overrides win over the shared ones, which win
+        // over the built-in defaults below.
+        JSObject specific = null;
+        try {
+            specific = call.getObject(overlay ? "overlay" : "install");
+        } catch (Exception ignored) {
+            // Malformed override - fall back to the shared copy.
+        }
+        final String title = firstNonEmpty(
+                readCopy(specific, call, "title"),
+                overlay ? "Allow display over other apps" : "Allow app installs");
         final String message = firstNonEmpty(
-                call.getString("message"),
-                "To keep \"" + appName + "\" up to date, allow both permissions on the "
-                        + "next screen:\n\n"
-                        + "1. Install unknown apps - required to install app updates"
-                        + (installGranted ? " (already allowed)." : ".") + "\n"
-                        + "2. Display over other apps - lets the app reopen itself "
-                        + "automatically after an update"
-                        + (overlayGranted ? " (already allowed)." : ".") + "\n\n"
-                        + "Tap Continue, then enable both on this app's App info page.");
-        final String confirmText = firstNonEmpty(call.getString("confirmText"), "Continue");
-        final String cancelText = firstNonEmpty(call.getString("cancelText"), "Not now");
+                readCopy(specific, call, "message"),
+                overlay
+                        ? "Allow \"" + appName + "\" to display over other apps.\n\n"
+                                + "This lets the app reopen itself automatically right "
+                                + "after an update is installed. The update itself works "
+                                + "without it.\n\n"
+                                + "Tap Continue and enable \"Allow display over other "
+                                + "apps\" (or \"Display over other apps\") on the next "
+                                + "screen."
+                        : "Allow \"" + appName + "\" to install app updates.\n\n"
+                                + "This permission is required before the app can install "
+                                + "an update.\n\n"
+                                + "Tap Continue and enable \"Allow from this source\" (or "
+                                + "\"Install unknown apps\") on the next screen.");
+        final String confirmText = firstNonEmpty(
+                readCopy(specific, call, "confirmText"), "Continue");
+        final String cancelText = firstNonEmpty(
+                readCopy(specific, call, "cancelText"), "Not now");
 
         activity.runOnUiThread(() -> {
             if (permissionCall == null || getActivity() == null) return;
@@ -394,56 +541,118 @@ public class ApkUpdaterPlugin extends Plugin {
                         .setCancelable(false)
                         .setPositiveButton(
                                 confirmText,
-                                (dialog, which) -> openAppInfoForPermissions())
+                                (dialog, which) -> openPermissionSettings(kind))
                         .setNegativeButton(
                                 cancelText,
                                 (dialog, which) -> finishPermissionFlow())
                         .show();
             } catch (Exception ex) {
-                Log.w(TAG, "Unable to show the permission dialog", ex);
+                Log.w(TAG, "Unable to show the " + kind + " permission dialog", ex);
                 finishPermissionFlow();
             }
         });
     }
 
+    /** Reads a copy override from the per-permission object, then the shared ones. */
+    private static String readCopy(JSObject specific, PluginCall call, String key) {
+        try {
+            if (specific != null) {
+                String value = specific.getString(key);
+                if (value != null && !value.trim().isEmpty()) return value;
+            }
+            return call.getString(key);
+        } catch (Exception ignored) {
+            return null;
+        }
+    }
+
     /**
-     * The single redirect: this app's App info page. It is ONE stable intent
-     * ({@link Settings#ACTION_APPLICATION_DETAILS_SETTINGS} + package uri)
-     * that works on every Android version - Android 6+ lists "Display over
-     * other apps" and Android 8+ also lists "Install unknown apps", so the
-     * user enables BOTH toggles in one place and returns once. (Below
-     * Android 8 the install permission needs no entry here at all - the
-     * system installer shows its own "Unknown sources" dialog at install
-     * time, see {@link #canRequestInstalls()}.)
+     * Opens the EXACT Settings page of ONE permission and parks the flow until
+     * the user comes back ({@link #handleOnResume()} re-checks it):
+     *
+     * <ul>
+     *   <li><b>install</b> - {@code ACTION_MANAGE_UNKNOWN_APP_SOURCES} with this
+     *       app's package (Android 8+), the page holding the "Allow from this
+     *       source" toggle. Below Android 8 the permission is not required (see
+     *       {@link #canRequestInstalls()}).</li>
+     *   <li><b>overlay</b> - {@code ACTION_MANAGE_OVERLAY_PERMISSION} with this
+     *       app's package (Android 6+), the "Display over other apps" page.</li>
+     * </ul>
+     *
+     * <p>Only if that activity cannot be opened (OEM without that Settings
+     * screen) the redirect falls back to the app's generic App info page -
+     * recent Android releases hide the "Install unknown apps" toggle there,
+     * which is exactly why the specific page is used first.</p>
      */
-    private void openAppInfoForPermissions() {
+    private void openPermissionSettings(String kind) {
+        if (!openPermissionSettingsPage(kind) && !openAppInfoSettings()) {
+            finishPermissionFlow();
+            return;
+        }
+        awaitingPermissionSettings = true;
+    }
+
+    /** Opens the permission-specific Settings page; false when unavailable. */
+    private boolean openPermissionSettingsPage(String kind) {
+        try {
+            Uri packageUri = Uri.parse("package:" + getContext().getPackageName());
+            Intent intent = null;
+            if (PERMISSION_KIND_OVERLAY.equals(kind)) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    intent = new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, packageUri);
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                intent = new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, packageUri);
+            }
+            if (intent == null) return false;
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivitySafely(intent);
+            return true;
+        } catch (Exception ex) {
+            Log.w(TAG, "Unable to open the " + kind + " permission settings", ex);
+            return false;
+        }
+    }
+
+    /** Last-resort redirect: this app's generic App info page. */
+    private boolean openAppInfoSettings() {
         try {
             Intent intent = new Intent(
                     Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
                     Uri.parse("package:" + getContext().getPackageName()));
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            awaitingPermissionSettings = true;
             startActivitySafely(intent);
+            return true;
         } catch (Exception ex) {
             Log.w(TAG, "Unable to open the App info page", ex);
-            awaitingPermissionSettings = false;
-            finishPermissionFlow();
+            return false;
         }
     }
 
     /** Resolves the pending JS call with the final permission status. */
     private void finishPermissionFlow() {
         awaitingPermissionSettings = false;
+        permissionShowNativeDialog = true;
+        pendingPermissionKinds.clear();
         PluginCall call = permissionCall;
         permissionCall = null;
         if (call == null) return;
+        call.resolve(buildPermissionStatus());
+    }
+
+    /** Shared permission payload: {@code { canInstall, canDrawOverlays, ready, canUpdate }}. */
+    private JSObject buildPermissionStatus() {
         boolean canInstall = canRequestInstalls();
         boolean canOverlay = canDrawOverlaysNow();
         JSObject result = new JSObject();
         result.put("canInstall", canInstall);
         result.put("canDrawOverlays", canOverlay);
         result.put("ready", canInstall && canOverlay);
-        call.resolve(result);
+        // Only "install unknown apps" is required to install an update; the
+        // overlay helper is best effort (without it the app still comes back
+        // through the tap-to-open notification).
+        result.put("canUpdate", canInstall);
+        return result;
     }
 
     /** The host app's own logo - what makes the dialog look native everywhere. */
@@ -463,18 +672,39 @@ public class ApkUpdaterPlugin extends Plugin {
     }
 
     /**
-     * One-shot readiness check for the pre-update gate:
-     * {@code { canInstall, canDrawOverlays, ready }} - see
-     * {@link #requestUpdatePermissions} for the prompting flow.
+     * One-shot readiness check for the pre-update gate (no dialog, no Settings
+     * trip): {@code { canInstall, canDrawOverlays, ready, canUpdate }} - see
+     * {@link #requestUpdatePermissions} / {@link #requestInstallPermission} /
+     * {@link #requestOverlayPermission} for the prompting flow.
      */
     @PluginMethod
     public void getPermissionStatus(PluginCall call) {
+        call.resolve(buildPermissionStatus());
+    }
+
+    /**
+     * One-shot check of the "Install unknown apps" permission only (no dialog):
+     * {@code { granted, required }}. `required` is false below Android 8, where
+     * the OS does not expose a per-app toggle.
+     */
+    @PluginMethod
+    public void checkInstallPermission(PluginCall call) {
         JSObject result = new JSObject();
-        boolean canInstall = canRequestInstalls();
-        boolean canOverlay = canDrawOverlaysNow();
-        result.put("canInstall", canInstall);
-        result.put("canDrawOverlays", canOverlay);
-        result.put("ready", canInstall && canOverlay);
+        result.put("granted", canRequestInstalls());
+        result.put("required", Build.VERSION.SDK_INT >= Build.VERSION_CODES.O);
+        call.resolve(result);
+    }
+
+    /**
+     * One-shot check of the "Display over other apps" permission only (no
+     * dialog): {@code { granted, required }}. `required` is false below
+     * Android 6, where the permission is granted at install time.
+     */
+    @PluginMethod
+    public void checkOverlayPermission(PluginCall call) {
+        JSObject result = new JSObject();
+        result.put("granted", canDrawOverlaysNow());
+        result.put("required", Build.VERSION.SDK_INT >= Build.VERSION_CODES.M);
         call.resolve(result);
     }
 

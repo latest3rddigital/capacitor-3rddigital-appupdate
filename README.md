@@ -36,6 +36,12 @@ npx cap sync
 > `SYSTEM_ALERT_WINDOW`, `POST_NOTIFICATIONS`, `INTERNET`)
 > and a FileProvider are merged
 > into your app's manifest automatically by the Android manifest merger.
+>
+> The two special-access permissions (`REQUEST_INSTALL_PACKAGES` = "Install
+> unknown apps", `SYSTEM_ALERT_WINDOW` = "Display over other apps") cannot be
+> granted programmatically, so the plugin ships its own **native popup per
+> permission** whose Continue button opens that permission's **exact Settings
+> page** — no project-side UI is needed (and both can also be driven from JS).
 
 ## 📦 Usage in Your App
 
@@ -93,17 +99,45 @@ How it behaves:
 - **Permission-first (all Android versions):** on app open the hook checks
   BOTH "Install unknown apps" (REQUIRED to install any APK) and "Display over
   other apps" (lets the app reopen itself after the OS kills it for the
-  install). Neither can be granted programmatically, so the plugin shows its
-  **native permission dialog** — ONE Android `AlertDialog` drawn with the host
-  app's own **theme and logo** (it looks like a system permission popup, so
-  **no per-project UI/styling is ever needed**) that lists **both permission
-  messages in a single popup**. Continue opens the app's **App info page** —
-  where both toggles live (Android 8+ lists "Install unknown apps", Android
-  6+ lists "Display over other apps") — so the user enables **both in one
-  place and returns once**; the flow then re-checks both toggles. The APK
-  update popup only appears once both are granted — first launch therefore
-  shows the native permission dialog, never the update popup straight after
-  install.
+  install). Neither can be granted programmatically, so as soon as a known
+  update needs them (or right away when you call `ensureApkPermissions()` on
+  open — the pattern below) the plugin shows its **native permission
+  popups** — ONE Android `AlertDialog` **PER missing permission**, drawn with
+  the host app's own **theme and logo** (they look like system permission
+  popups, so **no per-project UI/styling is ever needed**).
+  - Each popup's **Continue** opens the **exact Settings page of that
+    permission**:
+    - "Install unknown apps" → `ACTION_MANAGE_UNKNOWN_APP_SOURCES` (this app's
+      page with the "Allow from this source" toggle). This is required —
+      recent Android releases (e.g. Android 12) **no longer list the toggle on
+      the generic App info page**, so a plain App-info redirect would leave the
+      user hunting for it.
+    - "Display over other apps" → `ACTION_MANAGE_OVERLAY_PERMISSION` (this
+      app's page). The generic App info page remains only the fallback for
+      OEMs without those Settings screens.
+  - Permissions that are **already granted are skipped silently** — on devices
+    where one of the two is granted by default (several Android 12-and-older
+    builds, cloud-restored devices, pre-granted ROMs) **only the missing one is
+    prompted**, i.e. a single popup.
+  - Each permission is prompted **at most once per flow**: coming back from
+    Settings _with_ the grant moves on to the next missing permission; coming
+    back _without_ it resolves the flow (no nagging — the prompt runs again on
+    the next launch).
+  - The APK update popup only appears once the gate passes — first launch
+    therefore shows the native permission popup, never the update popup
+    straight after install.
+- **APK flow can be blocked, the bundle (OTA) flow never is:** without the
+  "install unknown apps" permission the APK download/install is **blocked**
+  (it simply cannot be installed). If the user declines or comes back without
+  granting, `apkUpdatePriority` is **released to `clear`** so
+  `useCapacitorUpdater` keeps working **without these permissions** (opt out
+  with `keepBundleUpdatesBlockedWithoutApkPermission: true`). The parked APK
+  update stays persisted and is offered again on the next launch/foreground —
+  and any grant reported in-session (`ensureApkPermissions`,
+  `requestApkPermission`, `checkApkPermission` or `openApkPermissionSettings`)
+  continues it immediately and fires `onPermissionsGranted`.
+  `apkBlockedByPermission` tells you when the APK flow is waiting on a
+  permission so you can render your own "grant permissions" affordance.
 - On **Android 12+** (with the `UPDATE_PACKAGES_WITHOUT_USER_ACTION` permission) the
   self-update is **silent**: the app is killed and restarted automatically when
   the install completes.
@@ -124,10 +158,11 @@ How it behaves:
   the automatic reopen paths still run.
 - **"Display over other apps"**: NOT required for the install itself — only a
   best-effort helper so the app can reopen itself from the background after
-  the OS kills it for the install. It is listed in the SAME single native
-  dialog (together with "Install unknown apps") and enabled from the same
-  App info page. Without it the update
-  still works via the tap-to-open notification fallback.
+  the OS kills it for the install. It gets its **own native popup** ("Display
+  over other apps" → `ACTION_MANAGE_OVERLAY_PERMISSION`), but it **never blocks
+  the update**: the gate only requires "Install unknown apps" by default (use
+  `requiredPermissions: "both"` for the strict old behaviour). Without it the
+  update still works via the tap-to-open notification fallback.
 - **Progress**: `isApkUpdating` + `apkPhase` + `apkProgress`/`apkProgressInfo`
   track the whole journey (download → install-session staging → waiting for
   confirmation → done). Feed them into your own progress screen.
@@ -177,9 +212,13 @@ const App = () => {
     onUpdateSuccess: () => message.success("App updated successfully"),
   });
 
-  // Permission-first: ask on app open, BEFORE any update popup. This runs the
-  // plugin's NATIVE dialog (app logo + system style) listing BOTH permissions
-  // in one popup; Continue opens App info where both are enabled in one place.
+  // Permission gate: ask on app open, BEFORE any update popup. This runs the
+  // plugin's NATIVE popups - one Android dialog PER missing permission (app
+  // logo + system style), each Continue opening that permission's OWN Settings
+  // page ("Install unknown apps" / "Display over other apps"), so the user
+  // never has to hunt for the toggle. Already granted permissions are skipped,
+  // so on devices where one of the two is granted by default only one popup
+  // appears.
   useEffect(() => {
     ensureApkPermissions();
   }, []);
@@ -211,7 +250,13 @@ export default App;
 > into `useCapacitorUpdater`. The APK hook starts in `checking`; a forced APK
 > sets it to `blocked` and keeps OTA checks paused until that APK is confirmed
 > installed after relaunch. It becomes `clear` when no forced APK update is
-> available or after successful installation. Call `useApkUpdater` first:
+> available, after successful installation — **and while the forced APK
+> update cannot run because the user has not granted the required
+> permissions** (it flips back to `blocked` the moment the granted forced
+> download actually starts), so the OTA/`AppUpdate` flow always keeps working
+> without those permissions (opt out with
+> `keepBundleUpdatesBlockedWithoutApkPermission: true`). Call
+> `useApkUpdater` first:
 >
 > ```tsx
 > const apk = useApkUpdater({ baseUrl, projectKey, apiKey });
@@ -276,7 +321,7 @@ Props:
 | `cancelText`  | string     | `"Cancel"`           | Cancel button text                  |
 | `styles`      | object     | `{}`                 | Style overrides for modal & buttons |
 
-### 🔹 useApkUpdater(options?: { baseUrl: string; projectKey?: string; packageName?: string; apiKey?: string; onProgress?; onPhaseChange?; onInstallStateChange?; onInstallPermissionGranted?; onUpdateSuccess?; preflightInstallPermission?: boolean })
+### 🔹 useApkUpdater(options?: { baseUrl: string; projectKey?: string; packageName?: string; apiKey?: string; onProgress?; onPhaseChange?; onInstallStateChange?; onPermissionsGranted?; onPermissionStatusChange?; nativePermissionPrompt?; permissionPromptOptions?; requiredPermissions?; keepBundleUpdatesBlockedWithoutApkPermission?; onUpdateSuccess?; onInstallPermissionGranted?; preflightInstallPermission?: boolean })
 
 - Android-only hook that checks the server for the latest APK, matches the
   installed `versionCode`, downloads the APK from S3, and installs it via the
@@ -286,53 +331,150 @@ Props:
 
 Options:
 
-| Key                          | Type                                                     | Required | Description                                                                                                                 |
-| ---------------------------- | -------------------------------------------------------- | -------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `baseUrl`                    | string                                                   | ✅       | Base url for app update                                                                                                     |
-| `projectKey`                 | string                                                   | ✅       | Project key to identify the app on your update server                                                                       |
-| `apiKey`                     | string                                                   | ✅       | API key sent in the `Api-Key` header for authentication                                                                     |
-| `packageName`                | string                                                   | ❌       | Android applicationId. Defaults to the installed app's package                                                              |
-| `rejectDebugApkOnRelease`    | boolean                                                  | ❌       | Default `true`: a release install ignores debug-flagged updates (needs `buildType`/`isDebugApk` from the server)            |
-| `onBlockedUpdate`            | `(info: ApkUpdateInfo, reason: string) => void`          | ❌       | Fired when a debug update is blocked on a release install                                                                   |
-| `showProgress`               | boolean                                                  | ❌       | Deprecated — progress events are always delivered now                                                                       |
-| `onProgress`                 | `(percent: number, info: ApkProgressInfo) => void`       | ❌       | Overall 0-100 progress across download + install                                                                            |
-| `onPhaseChange`              | `(phase: ApkUpdatePhase, info: ApkProgressInfo) => void` | ❌       | Fired when the phase changes                                                                                                |
-| `onInstallStateChange`       | function                                                 | ❌       | Callback with `{ state: "staging" \| "pending_user_action" \| "success" \| "failure", message?, percent? }`                 |
-| `onPermissionsGranted`       | `() => void`                                             | ❌       | Both toggles granted after the permission Settings round trip (update popup re-appears)                                     |
-| `onInstallPermissionGranted` | `() => void`                                             | ❌       | Deprecated alias of `onPermissionsGranted` (kept for compatibility)                                                         |
-| `onUpdateSuccess`            | `(info: { versionCode, versionName? }) => void`          | ❌       | Fired once on the launch after a successful update — show your success message here (like the AppUpdate flow)               |
-| `preflightInstallPermission` | boolean                                                  | ❌       | Deprecated — the flow ALWAYS checks both permissions on app open (native dialog) and only shows the update popup once ready |
+| Key                                            | Type                                                     | Required | Description                                                                                                                                                                                              |
+| ---------------------------------------------- | -------------------------------------------------------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `baseUrl`                                      | string                                                   | ✅       | Base url for app update                                                                                                                                                                                  |
+| `projectKey`                                   | string                                                   | ✅       | Project key to identify the app on your update server                                                                                                                                                    |
+| `apiKey`                                       | string                                                   | ✅       | API key sent in the `Api-Key` header for authentication                                                                                                                                                  |
+| `packageName`                                  | string                                                   | ❌       | Android applicationId. Defaults to the installed app's package                                                                                                                                           |
+| `rejectDebugApkOnRelease`                      | boolean                                                  | ❌       | Default `true`: a release install ignores debug-flagged updates (needs `buildType`/`isDebugApk` from the server)                                                                                         |
+| `onBlockedUpdate`                              | `(info: ApkUpdateInfo, reason: string) => void`          | ❌       | Fired when a debug update is blocked on a release install                                                                                                                                                |
+| `showProgress`                                 | boolean                                                  | ❌       | Deprecated — progress events are always delivered now                                                                                                                                                    |
+| `onProgress`                                   | `(percent: number, info: ApkProgressInfo) => void`       | ❌       | Overall 0-100 progress across download + install                                                                                                                                                         |
+| `onPhaseChange`                                | `(phase: ApkUpdatePhase, info: ApkProgressInfo) => void` | ❌       | Fired when the phase changes                                                                                                                                                                             |
+| `onInstallStateChange`                         | function                                                 | ❌       | Callback with `{ state: "staging" \| "pending_user_action" \| "success" \| "failure", message?, percent? }`                                                                                              |
+| `onPermissionsGranted`                         | `() => void`                                             | ❌       | Required permission(s) granted after the permission Settings round trip (update popup re-appears)                                                                                                        |
+| `onPermissionStatusChange`                     | `(status: ApkPermissionStatus) => void`                  | ❌       | Fired after every permission check/prompt with the fresh status                                                                                                                                          |
+| `nativePermissionPrompt`                       | boolean                                                  | ❌       | Default `true`: the plugin shows its NATIVE popup per missing permission. `false` = check only, render your own JS popup                                                                                 |
+| `permissionPromptOptions`                      | `ApkPermissionPromptOptions`                             | ❌       | Copy overrides for the native popups: `title`, `message`, `confirmText`, `cancelText` and per-permission `install` / `overlay` objects                                                                   |
+| `requiredPermissions`                          | `"install" \| "both"`                                    | ❌       | Default `"install"` (only the permission actually needed). `"both"` also requires "Display over other apps"                                                                                              |
+| `keepBundleUpdatesBlockedWithoutApkPermission` | boolean                                                  | ❌       | Default `false`: without the permissions the APK gate is released so the OTA flow keeps working. `true` keeps OTA paused                                                                                 |
+| `onInstallPermissionGranted`                   | `() => void`                                             | ❌       | Deprecated alias of `onPermissionsGranted` (kept for compatibility)                                                                                                                                      |
+| `onUpdateSuccess`                              | `(info: { versionCode, versionName? }) => void`          | ❌       | Fired once on the launch after a successful update — show your success message here (like the AppUpdate flow)                                                                                            |
+| `preflightInstallPermission`                   | boolean                                                  | ❌       | Deprecated — the flow always checks both permissions on app open and runs the NATIVE popup per missing permission the moment a known update needs them; the update popup only shows once the gate passes |
 
 Returns:
 
-| Key                             | Type                                             | Description                                                                                                                        |
-| ------------------------------- | ------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
-| `apkUpdateInfo`                 | `ApkUpdateInfo \| null`                          | Metadata about the available APK update                                                                                            |
-| `apkUpdatePriority`             | `ApkUpdatePriority`                              | APK check/update gate: `checking`, `blocked` by a forced APK, or `clear` for OTA                                                   |
-| `isApkUpdateModalVisible`       | `boolean`                                        | Whether the update prompt state is visible                                                                                         |
-| `setApkUpdateModalVisible`      | `(bool) => void`                                 | Show/hide your update prompt                                                                                                       |
-| `handleApkUpdate`               | `() => Promise<void>`                            | Starts download → install (idempotent while running)                                                                               |
-| `apkProgress`                   | `number`                                         | Overall 0-100: download 0–90, install staging 90–99, awaiting confirmation 99, success 100                                         |
-| `apkProgressInfo`               | `ApkProgressInfo`                                | `{ phase, percent, downloadPercent, bytesWritten, totalBytes, message }`                                                           |
-| `apkPhase`                      | `ApkUpdatePhase`                                 | `idle \| permission \| downloading \| installing \| confirming \| success \| failure`                                              |
-| `isApkUpdating`                 | `boolean`                                        | `true` while the update runs — show your progress screen                                                                           |
-| `apkError`                      | `string \| null`                                 | Last failure/cancel message (prompt re-opens automatically for retry)                                                              |
-| `apkUpdateJustCompleted`        | `boolean`                                        | `true` on the launch right after a successful update                                                                               |
-| `installState`                  | `ApkInstallStateInfo \| null`                    | Latest install state reported by the native plugin                                                                                 |
-| `canInstall`                    | `boolean \| null`                                | Whether the "install unknown apps" permission is granted (from the combined gate)                                                  |
-| `apkPermissionStatus`           | `{ canInstall, canDrawOverlays, ready } \| null` | Combined gate — `ready` only when BOTH toggles granted; show the update popup only then                                            |
-| `ensureApkPermissions`          | `() => Promise<boolean>`                         | Call on app open — checks both toggles and runs the plugin's NATIVE permission dialog when not ready (no web UI to style)          |
-| `refreshApkPermissionStatus`    | `() => Promise<status>`                          | Re-reads both toggles without prompting                                                                                            |
-| `restartApp`                    | `() => Promise<void>`                            | Relaunches the app and kills the current process                                                                                   |
-| `openInstallPermissionSettings` | `() => Promise<void>`                            | Manual fallback: opens the "install unknown apps" Settings page directly (normally unnecessary — `ensureApkPermissions` covers it) |
+| Key                             | Type                                                        | Description                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apkUpdateInfo`                 | `ApkUpdateInfo \| null`                                     | Metadata about the available APK update                                                                                                                                                                                                                                                                                            |
+| `apkUpdatePriority`             | `ApkUpdatePriority`                                         | APK check/update gate: `checking`, `blocked` by a forced APK, or `clear` for OTA                                                                                                                                                                                                                                                   |
+| `isApkUpdateModalVisible`       | `boolean`                                                   | Whether the update prompt state is visible                                                                                                                                                                                                                                                                                         |
+| `setApkUpdateModalVisible`      | `(bool) => void`                                            | Show/hide your update prompt                                                                                                                                                                                                                                                                                                       |
+| `handleApkUpdate`               | `() => Promise<void>`                                       | Starts download → install (idempotent while running)                                                                                                                                                                                                                                                                               |
+| `apkProgress`                   | `number`                                                    | Overall 0-100: download 0–90, install staging 90–99, awaiting confirmation 99, success 100                                                                                                                                                                                                                                         |
+| `apkProgressInfo`               | `ApkProgressInfo`                                           | `{ phase, percent, downloadPercent, bytesWritten, totalBytes, message }`                                                                                                                                                                                                                                                           |
+| `apkPhase`                      | `ApkUpdatePhase`                                            | `idle \| permission \| downloading \| installing \| confirming \| success \| failure`                                                                                                                                                                                                                                              |
+| `isApkUpdating`                 | `boolean`                                                   | `true` while the update runs — show your progress screen                                                                                                                                                                                                                                                                           |
+| `apkError`                      | `string \| null`                                            | Last failure/cancel message (prompt re-opens automatically for retry)                                                                                                                                                                                                                                                              |
+| `apkUpdateJustCompleted`        | `boolean`                                                   | `true` on the launch right after a successful update                                                                                                                                                                                                                                                                               |
+| `installState`                  | `ApkInstallStateInfo \| null`                               | Latest install state reported by the native plugin                                                                                                                                                                                                                                                                                 |
+| `canInstall`                    | `boolean \| null`                                           | Whether the "install unknown apps" permission is granted (from `canUpdate` in the permission status)                                                                                                                                                                                                                               |
+| `apkPermissionStatus`           | `{ canInstall, canDrawOverlays, ready, canUpdate } \| null` | Permission state — `canUpdate` (install permission granted) is the default gate; `ready` stays "both granted"                                                                                                                                                                                                                      |
+| `apkBlockedByPermission`        | `boolean`                                                   | `true` while a known APK update cannot run because the permissions are missing (APK flow blocked; OTA flow never blocked)                                                                                                                                                                                                          |
+| `ensureApkPermissions`          | `(options?) => Promise<boolean>`                            | Call on app open — checks the permissions and runs the plugin's NATIVE popup per missing permission (no web UI to style). `{ showNativeDialog: false }` / `{ permissions: ["install"] }` supported                                                                                                                                 |
+| `refreshApkPermissionStatus`    | `() => Promise<status>`                                     | Re-reads both permissions without prompting                                                                                                                                                                                                                                                                                        |
+| `checkApkPermission`            | `(kind) => Promise<boolean>`                                | Checks ONE permission (`"install"` \| `"overlay"`) without any dialog/Settings trip — for your own JS permission popup; when it reveals the whole gate is granted it also clears `apkBlockedByPermission` and continues a parked update                                                                                            |
+| `requestApkPermission`          | `(kind, options?) => Promise<boolean>`                      | Requests ONE permission with its OWN native popup (Continue → that permission's Settings page); `showNativeDialog: false` skips the popup; when the grant completes the gate the parked update continues (like the combined prompt), while a still-missing required permission keeps the APK blocked but releases the OTA priority |
+| `openApkPermissionSettings`     | `(kind?) => Promise<void>`                                  | Opens one permission's Settings page directly (`"install"` = Install unknown apps, `"overlay"` = Display over other apps)                                                                                                                                                                                                          |
+| `restartApp`                    | `() => Promise<void>`                                       | Relaunches the app and kills the current process                                                                                                                                                                                                                                                                                   |
+| `openInstallPermissionSettings` | `() => Promise<void>`                                       | Shortcut for `openApkPermissionSettings("install")`                                                                                                                                                                                                                                                                                |
+| `openOverlayPermissionSettings` | `() => Promise<void>`                                       | Shortcut for `openApkPermissionSettings("overlay")`                                                                                                                                                                                                                                                                                |
+
+### 🔹 Permissions: native popups vs. your own JS UI
+
+The plugin owns the whole special-permission handling, and everything is
+switchable from JS:
+
+**1. Native popups (default).** `ensureApkPermissions()` (or
+`useEffect(() => { ensureApkPermissions(); }, [])`) shows **one native popup per
+missing permission** and each **Continue** jumps straight to that permission's
+own Settings page:
+
+| Permission                | Popup Continue opens                | Required?                                     |
+| ------------------------- | ----------------------------------- | --------------------------------------------- |
+| "Install unknown apps"    | `ACTION_MANAGE_UNKNOWN_APP_SOURCES` | ✅ yes — the APK update is blocked without it |
+| "Display over other apps" | `ACTION_MANAGE_OVERLAY_PERMISSION`  | ❌ best effort — auto-reopen helper only      |
+
+Copy can be overridden globally or per permission:
+
+```tsx
+ensureApkPermissions(); // or configure the hook:
+
+useApkUpdater({
+  // ...connection options
+  permissionPromptOptions: {
+    confirmText: "Continue",
+    install: {
+      title: "Allow app installs",
+      message: "Required to install updates.",
+    },
+    overlay: {
+      title: "Allow display over other apps",
+      message: "Lets the app reopen itself.",
+    },
+  },
+});
+```
+
+**2. Disable the native popup and render your own UI.** Turn the native popups
+off and drive everything from JS - the check/request/settings APIs exist for
+**both** permissions:
+
+```tsx
+const {
+  apkPermissionStatus,        // { canInstall, canDrawOverlays, ready, canUpdate }
+  checkApkPermission,         // check ONE permission, no dialog
+  requestApkPermission,       // ONE permission, its own native popup (optional)
+  openApkPermissionSettings,  // jump straight to that permission's Settings page
+  apkBlockedByPermission,     // APK update waiting on a permission
+} = useApkUpdater({
+  // ...connection options
+  nativePermissionPrompt: false, // no automatic native popups
+});
+
+// In your own modal:
+const needsInstall = !(await checkApkPermission("install"));
+const needsOverlay = !(await checkApkPermission("overlay"));
+
+<button onClick={() => openApkPermissionSettings("install")}>Allow installs</button>
+<button onClick={() => openApkPermissionSettings("overlay")}>Allow overlay</button>
+
+// Or let the plugin show the native popup for just one of them:
+// await requestApkPermission("install");                                   // native popup
+// await requestApkPermission("overlay", { showNativeDialog: false });      // status only
+```
+
+> Coming back from Settings with the grant needs **no resume wiring in your
+> popup**: `openApkPermissionSettings` (and any `requestApkPermission` /
+> `checkApkPermission` re-check) continues the parked update automatically —
+> `onPermissionsGranted` fires, forced updates restart straight into the
+> progress screen, optional updates reopen their popup.
+
+**3. What is blocked when a permission is missing.**
+
+- The **APK update flow is blocked** without "Install unknown apps" - it cannot
+  be installed, so the download is not even started. The parked update stays
+  persisted and is offered again on the next launch/foreground — or as soon as
+  any permission API above reports the grant; the gate only
+  requires "Install unknown apps" (add `requiredPermissions: "both"` to also
+  require the overlay helper).
+- The **bundle (OTA) / App update flow is NEVER blocked** by these permissions:
+  when the user does not grant them, `apkUpdatePriority` is released to
+  `clear`, so `useCapacitorUpdater` (the `AppUpdate` flow) keeps working
+  normally without them — even when a **forced** APK update is available.
+  Set `keepBundleUpdatesBlockedWithoutApkPermission: true` if you prefer the
+  old strict behaviour of keeping OTA paused until the forced APK installs.
 
 ### 🔹 ApkUpdaterModal
 
 - `ApkUpdaterModal` — prompt for installing an APK update (separate from
-  `UpdaterModal`). Render it only after `apkPermissionStatus.ready`.
-- The permission prompt itself is NOT a web modal: it is the plugin's native
-  Android dialog (host app theme + app logo), so there is nothing to render
-  or restyle per project.
+  `UpdaterModal`). Render it only once the gate passes
+  (`apkPermissionStatus.canUpdate`, or `ready` when you gate on both).
+- The permission popups themselves are NOT web modals: they are the plugin's
+  native Android dialogs (host app theme + app logo), so there is nothing to
+  render or restyle per project — unless you opt into
+  `nativePermissionPrompt: false` and build your own UI with the JS APIs above.
 
 Props:
 
@@ -355,16 +497,21 @@ Props:
 
 Also exported directly for advanced/manual usage. Methods:
 
-| Method                                          | Returns                                     | Description                                                                                                                                                                                                                                                                                                                                                                                      |
-| ----------------------------------------------- | ------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `getAppInfo()`                                  | `{ packageName, versionName, versionCode }` | Installed app info (versionCode from PackageInfo)                                                                                                                                                                                                                                                                                                                                                |
-| `getPermissionStatus()`                         | `{ canInstall, canDrawOverlays, ready }`    | Combined gate for the pre-update prompt (neither toggle can be granted programmatically)                                                                                                                                                                                                                                                                                                         |
-| `requestUpdatePermissions(options?)`            | `{ canInstall, canDrawOverlays, ready }`    | NATIVE permission prompt — ONE Android dialog (host app theme + the app's logo) listing BOTH permissions together; Continue opens the app's **App info page** where both toggles live (Android 8+ "Install unknown apps", Android 6+ "Display over other apps"), so the user allows both in ONE place and returns once; optional copy overrides: `title`, `message`, `confirmText`, `cancelText` |
-| `canInstall()`                                  | `{ canInstall: boolean }`                   | Whether the app may install APKs (Android never grants this silently — the user enables it in Settings)                                                                                                                                                                                                                                                                                          |
-| `openInstallPermissionSettings()`               | `void`                                      | Opens the "install unknown apps" settings                                                                                                                                                                                                                                                                                                                                                        |
-| `download({ url, versionName?, versionCode? })` | `{ path, size }`                            | Downloads the APK from S3, emits `downloadProgress` events                                                                                                                                                                                                                                                                                                                                       |
-| `install({ filePath? })`                        | `{ status, message? }`                      | Commits the PackageInstaller session (handles the inline permission prompt itself; intent fallback)                                                                                                                                                                                                                                                                                              |
-| `restartApp()`                                  | `void`                                      | Relaunches the app and kills the current process                                                                                                                                                                                                                                                                                                                                                 |
+| Method                                          | Returns                                             | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| ----------------------------------------------- | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `getAppInfo()`                                  | `{ packageName, versionName, versionCode }`         | Installed app info (versionCode from PackageInfo)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `getPermissionStatus()`                         | `{ canInstall, canDrawOverlays, ready, canUpdate }` | Combined gate for the pre-update prompt (neither permission can be granted programmatically). `canUpdate` (install permission) is what the update needs; `ready` = both granted                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `checkInstallPermission()`                      | `{ granted, required }`                             | Checks ONLY "Install unknown apps" (no dialog). `required` is false below Android 8                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `checkOverlayPermission()`                      | `{ granted, required }`                             | Checks ONLY "Display over other apps" (no dialog). `required` is false below Android 6                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `requestUpdatePermissions(options?)`            | `{ canInstall, canDrawOverlays, ready, canUpdate }` | NATIVE permission prompt — **ONE Android dialog PER missing permission** (host app theme + the app's logo; already granted ones are skipped): "Install unknown apps" first, then "Display over other apps". Each **Continue opens that permission's OWN Settings page** (`ACTION_MANAGE_UNKNOWN_APP_SOURCES` / `ACTION_MANAGE_OVERLAY_PERMISSION`), never the generic App info page. Options: `showNativeDialog` (default true; false = no dialog, resolve current status), `permissions: ("install" \| "overlay")[]`, copy overrides `title`/`message`/`confirmText`/`cancelText` (+ per-permission `install` / `overlay`) |
+| `requestInstallPermission(options?)`            | `{ canInstall, canDrawOverlays, ready, canUpdate }` | NATIVE popup for "Install unknown apps" ONLY (the required one); Continue opens `ACTION_MANAGE_UNKNOWN_APP_SOURCES`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `requestOverlayPermission(options?)`            | `{ canInstall, canDrawOverlays, ready, canUpdate }` | NATIVE popup for "Display over other apps" ONLY; Continue opens `ACTION_MANAGE_OVERLAY_PERMISSION`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `canInstall()`                                  | `{ canInstall: boolean }`                           | Whether the app may install APKs (Android never grants this silently — the user enables it in Settings)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `openInstallPermissionSettings()`               | `void`                                              | Opens the "Install unknown apps" Settings page (`ACTION_MANAGE_UNKNOWN_APP_SOURCES`; App info fallback)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `openOverlayPermissionSettings()`               | `void`                                              | Opens the "Display over other apps" Settings page (`ACTION_MANAGE_OVERLAY_PERMISSION`; App info fallback)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `download({ url, versionName?, versionCode? })` | `{ path, size }`                                    | Downloads the APK from S3, emits `downloadProgress` events                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `install({ filePath? })`                        | `{ status, message? }`                              | Commits the PackageInstaller session (handles the inline permission prompt itself; intent fallback)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `restartApp()`                                  | `void`                                              | Relaunches the app and kills the current process                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 
 Events:
 
@@ -672,24 +819,33 @@ Headers: `Api-Key: <APPUPDATE_API_KEY>`
   Android never allows an app to grant either programmatically — both are
   special-access toggles only the user can flip in Settings, so there is no
   system dialog an app can invoke directly. The plugin therefore shows its
-  OWN **native dialog** — a single `AlertDialog` built from the host app's
-  theme and the app's own **logo**, so it looks like a system permission
-  popup and needs **zero per-project UI work**. The ONE popup lists **both**
-  permission messages together (granted ones are marked "already allowed");
-  Continue opens the app's **App info page**, which is a single stable
-  intent (`ACTION_APPLICATION_DETAILS_SETTINGS`) that works on every Android
-  version — Android 8+ (incl. 13/14/15) lists "Install unknown apps" and
-  Android 6+ lists "Display over other apps" — so the user enables **both
-  toggles in one place and comes back once**, where the flow re-checks both
-  and finally resolves `{ canInstall, canDrawOverlays, ready }`. The APK
-  update popup only appears once both are granted, so first launch shows the
-  native dialog — never the update popup straight after install. "Install
-  unknown apps" is REQUIRED; "Display over other apps" is best-effort
-  (auto-reopen helper — the update itself works without it via the
-  tap-to-open notification fallback, which needs no overlay). Below Android
-  8 the per-app install entry does not exist at all, so the flow does not
-  block there — the system installer shows its own "Unknown sources" dialog
-  at install time.
+  OWN **native popup PER missing permission** — an `AlertDialog` built from
+  the host app's theme and the app's own **logo**, so it looks like a system
+  permission popup and needs **zero per-project UI work**. Each popup's
+  **Continue** opens that permission's **exact Settings page**:
+  "Install unknown apps" → `ACTION_MANAGE_UNKNOWN_APP_SOURCES` (Android 8+
+  — required, because recent releases such as Android 12 no longer list the
+  toggle on the generic App info page), "Display over other apps" →
+  `ACTION_MANAGE_OVERLAY_PERMISSION` (Android 6+). The generic App info page
+  (`ACTION_APPLICATION_DETAILS_SETTINGS`) is kept only as a fallback on OEMs
+  without those Settings screens. Already-granted permissions are skipped
+  silently (so where one of the two is granted by default only the missing
+  one is prompted), each permission is prompted at most once per flow
+  (returning from Settings with the grant moves to the next missing one;
+  returning without resolves the flow — no nagging), and the final result is
+  `{ canInstall, canDrawOverlays, ready, canUpdate }`. The APK update popup
+  only appears once the gate passes (`canUpdate` by default), so first
+  launch shows the native popup — never the update popup straight after
+  install. "Install unknown apps" is REQUIRED; "Display over other apps" is
+  best-effort (auto-reopen helper — the update itself works without it via
+  the tap-to-open notification fallback, which needs no overlay; it never
+  blocks the update unless you opt into `requiredPermissions: "both"`).
+  Below Android 8 the per-app install entry does not exist at all, so the
+  flow does not block there — the system installer shows its own "Unknown
+  sources" dialog at install time. If the required permission is never
+  granted, the APK flow is parked (offered again next launch) while the
+  bundle/OTA flow keeps running (`apkUpdatePriority` is released to
+  `clear`).
 - **Progress**: `apkProgress`/`apkProgressInfo` cover the whole journey —
   download 0–90, install-session staging 90–99 (real byte progress from the
   native side), awaiting confirmation 99, success 100. Drive your own screen

@@ -83,25 +83,79 @@ export interface ApkAppInfo {
   debuggable?: boolean;
 }
 
-export interface ApkPermissionStatus {
-  canInstall: boolean;
-  canDrawOverlays: boolean;
-  /** True only when BOTH special permissions are granted. */
-  ready: boolean;
-}
+/**
+ * The two special Android permissions the APK flow can check/prompt for:
+ *
+ * - `"install"` - "Install unknown apps" (`REQUEST_INSTALL_PACKAGES`). REQUIRED
+ *   to install any APK; the update flow cannot run without it.
+ * - `"overlay"` - "Display over other apps" (`SYSTEM_ALERT_WINDOW`). Best-effort
+ *   helper so the app can reopen itself after the OS kills it for the install;
+ *   without it the app still comes back via the tap-to-open notification.
+ */
+export type ApkPermissionKind = "install" | "overlay";
 
 /**
- * Optional copy overrides for the NATIVE permission prompt: ONE dialog that
- * describes BOTH special permissions together and whose Continue button
- * opens the app's App info page (both toggles live there), drawn by Android
- * with the host app's theme and logo - so by default no per-project UI work
- * is needed at all.
+ * Copy overrides for ONE of the native permission popups. Every key falls back
+ * to the shared `ApkPermissionPromptOptions` value and then to the built-in
+ * default copy.
  */
-export interface ApkPermissionPromptOptions {
+export interface ApkPermissionPromptCopy {
   title?: string;
   message?: string;
   confirmText?: string;
   cancelText?: string;
+}
+
+export interface ApkPermissionStatus {
+  canInstall: boolean;
+  canDrawOverlays: boolean;
+  /**
+   * True only when BOTH special permissions are granted. Informational - the
+   * update itself only needs `canUpdate`.
+   */
+  ready: boolean;
+  /**
+   * True when the APK update itself may run: it only needs the "Install unknown
+   * apps" permission. "Display over other apps" is a best-effort auto-reopen
+   * helper, so a missing overlay never blocks the update. Optional so the layer
+   * still works against an older native plugin (defaults to `canInstall`).
+   */
+  canUpdate?: boolean;
+}
+
+/** Result of the per-permission check APIs (no dialog, no Settings trip). */
+export interface ApkSinglePermissionResult {
+  /** True when this permission is granted right now. */
+  granted: boolean;
+  /** False when this Android version does not need the permission at all. */
+  required: boolean;
+}
+
+/**
+ * Options for the NATIVE permission popups. Each prompt is ONE Android dialog
+ * (host app theme + the app's own logo, so it looks like a system permission
+ * popup - no per-project UI needed) whose Continue button opens the EXACT
+ * Settings page of that permission, so the user never has to find the toggle.
+ *
+ * Both permissions can also be handled from JS: pass `showNativeDialog: false`
+ * to get a plain status resolve, then render your own popup and call
+ * `openApkPermissionSettings(kind)` / `requestApkPermission(kind, ...)`.
+ */
+export interface ApkPermissionPromptOptions extends ApkPermissionPromptCopy {
+  /**
+   * When false the plugin draws NO dialog: it resolves immediately with the
+   * current status so your own JS UI/popup can drive the flow. Default true.
+   */
+  showNativeDialog?: boolean;
+  /**
+   * Which permissions the combined `requestUpdatePermissions()` handles, in
+   * order. Default `["install", "overlay"]`; already granted ones are skipped.
+   */
+  permissions?: ApkPermissionKind[];
+  /** Copy overrides for the "Install unknown apps" popup. */
+  install?: ApkPermissionPromptCopy;
+  /** Copy overrides for the "Display over other apps" popup. */
+  overlay?: ApkPermissionPromptCopy;
 }
 
 export interface ApkCanInstallResult {
